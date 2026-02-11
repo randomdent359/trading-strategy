@@ -24,8 +24,15 @@ MANAGED_SCHEMAS = {"trading_market_data", "trading_signals", "trading_paper"}
 
 
 def get_url() -> str:
-    """Resolve DB URL: env var takes precedence over alembic.ini."""
-    return os.environ.get("TRADING_DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    """Resolve DB URL: env var takes precedence over alembic.ini.
+
+    Ensures the psycopg (v3) driver is used — rewrites ``postgresql://``
+    to ``postgresql+psycopg://`` if no explicit driver is specified.
+    """
+    url = os.environ.get("TRADING_DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    if url and url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
 
 
 def include_object(obj, name, type_, reflected, compare_to):

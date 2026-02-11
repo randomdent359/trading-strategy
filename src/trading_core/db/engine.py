@@ -11,10 +11,17 @@ _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
+def _ensure_psycopg_driver(url: str) -> str:
+    """Rewrite postgresql:// to postgresql+psycopg:// for psycopg v3."""
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
 def init_engine(url: str, **kwargs) -> Engine:
     """Create the global engine and session factory."""
     global _engine, _SessionLocal
-    _engine = create_engine(url, **kwargs)
+    _engine = create_engine(_ensure_psycopg_driver(url), **kwargs)
     _SessionLocal = sessionmaker(bind=_engine)
     return _engine
 
