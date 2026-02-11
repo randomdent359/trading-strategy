@@ -110,3 +110,25 @@ class TestPolymarketExtraction:
         rows = _extract_markets(markets, ["BTC"])
         assert len(rows) == 1
         assert rows[0]["asset"] == "BTC"
+
+    def test_clob_api_snake_case_fields(self):
+        """CLOB API uses condition_id (snake_case) instead of conditionId."""
+        markets = [
+            {
+                "condition_id": "0xclob1",
+                "question": "Bitcoin above 150k by July?",
+                "outcomePrices": '["0.35", "0.65"]',
+                "volume": 80000,
+                "liquidity": 25000,
+            }
+        ]
+        rows = _extract_markets(markets, ["BTC", "ETH", "SOL"])
+        assert len(rows) == 1
+        assert rows[0]["market_id"] == "0xclob1"
+        assert rows[0]["yes_price"] == 0.35
+
+    def test_skips_non_dict_items(self):
+        """If the market list contains non-dict items, they should be skipped."""
+        markets = ["bad_string", {"conditionId": "0x1", "question": "BTC up?", "outcomePrices": [0.6, 0.4]}]
+        rows = _extract_markets(markets, ["BTC"])
+        assert len(rows) == 1

@@ -1,4 +1,12 @@
-"""Polymarket exchange client — REST API."""
+"""Polymarket exchange client — REST API.
+
+Supports both the gamma API (gamma-api.polymarket.com) and the CLOB API
+(clob.polymarket.com). The gamma API is preferred — it returns richer
+market objects with outcomePrices already included.
+
+The CLOB API wraps results in {"data": [...], "next_cursor": "..."}
+and uses snake_case field names (condition_id vs conditionId).
+"""
 
 from __future__ import annotations
 
@@ -7,12 +15,8 @@ from typing import Any
 import httpx
 
 
-# Keywords used to filter for crypto-related prediction markets.
-CRYPTO_KEYWORDS = ["BTC", "Bitcoin", "ETH", "Ethereum", "SOL", "Solana"]
-
-
 class PolymarketClient:
-    """Async client for the Polymarket gamma API."""
+    """Async client for the Polymarket API."""
 
     def __init__(self, base_url: str = "https://gamma-api.polymarket.com"):
         self.base_url = base_url.rstrip("/")
@@ -30,28 +34,71 @@ class PolymarketClient:
     async def get_markets(self, limit: int = 100) -> list[dict]:
         """Fetch active prediction markets (paginated).
 
-        Uses the /markets endpoint which returns individual markets with
-        outcomePrices, volume, liquidity, and conditionId fields.
+        Handles both response formats:
+        - Gamma API: returns a bare list of market dicts
+        - CLOB API: returns {"data": [...], "next_cursor": "..."}
         """
         http = await self._get_http()
         all_markets: list[dict] = []
         offset = 0
+        next_cursor: str | None = None
 
         while True:
-            resp = await http.get(
-                f"{self.base_url}/markets",
-                params={"closed": "false", "limit": limit, "offset": offset},
-            )
+            params: dict[str, Any] = {"limit": limit}
+
+            if next_cursor is not None:
+                # CLOB-style cursor pagination
+                params["next_cursor"] = next_cursor
+            else:
+                params["closed"] = "false"
+                if offset > 0:
+                    params["offset"] = offset
+
+            resp = await http.get(f"{self.base_url}/markets", params=params)
             resp.raise_for_status()
-            page = resp.json()
-            if not page:
+            body = resp.json()
+
+            # Detect response format
+            if isinstance(body, dict) and "data" in body:
+                # CLOB API format: {"data": [...], "next_cursor": "..."}
+                page = body["data"]
+                next_cursor = body.get("next_cursor") or None
+                if not page:
+                    break
+                all_markets.extend(page)
+                if next_cursor is None or next_cursor == "LTE=":
+                    break
+            elif isinstance(body, list):
+                # Gamma API format: bare list
+                if not body:
+                    break
+                all_markets.extend(body)
+                if len(body) < limit:
+                    break
+                offset += limit
+                next_cursor = None
+            else:
                 break
-            all_markets.extend(page)
-            if len(page) < limit:
-                break
-            offset += limit
 
         return all_markets
+
+    @staticmethod
+    def normalize_market(market: dict) -> dict:
+        """Normalize a market dict to use consistent camelCase field names.
+
+        The CLOB API uses snake_case (condition_id, question_id) while
+        the gamma API uses camelCase (conditionId, questionID). This
+        normalizes to the gamma API convention.
+        """
+        return {
+            "conditionId": market.get("conditionId") or market.get("condition_id", ""),
+            "question": market.get("question", ""),
+            "title": market.get("title", ""),
+            "outcomePrices": market.get("outcomePrices", []),
+            "volume24hr": market.get("volume24hr") or market.get("volume", 0),
+            "liquidity": market.get("liquidity") or market.get("liquidityNum", 0),
+            "id": market.get("id", ""),
+        }
 
     @staticmethod
     def parse_outcome_prices(raw: Any) -> list[float]:

@@ -39,25 +39,33 @@ def _upsert_market(session: Session, row: dict) -> None:
 def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
     """Filter and transform raw market dicts into DB-ready rows.
 
-    Accepts the flat list returned by the gamma API /markets endpoint.
-    Each dict has question, outcomePrices, conditionId, volume24hr, etc.
+    Accepts the flat list returned by get_markets() — works with both
+    gamma API (camelCase) and CLOB API (snake_case) field names.
+    Skips non-dict items defensively.
     """
     rows: list[dict] = []
     ts = datetime.now(timezone.utc)
 
     for market in market_data:
-        title = market.get("question", "") or market.get("title", "")
+        if not isinstance(market, dict):
+            continue
+
+        # Normalize to handle both gamma (camelCase) and CLOB (snake_case)
+        m = PolymarketClient.normalize_market(market)
+
+        title = m["question"] or m["title"]
+        if not title:
+            continue
+
         asset = PolymarketClient.classify_asset(title)
         if asset is None or asset not in assets:
             continue
 
-        raw_prices = market.get("outcomePrices", [])
-        prices = PolymarketClient.parse_outcome_prices(raw_prices)
-
+        prices = PolymarketClient.parse_outcome_prices(m["outcomePrices"])
         yes_price = prices[0] if len(prices) > 0 else None
         no_price = prices[1] if len(prices) > 1 else None
 
-        market_id = market.get("conditionId", "") or market.get("id", "")
+        market_id = m["conditionId"] or m["id"]
         if not market_id:
             continue
 
@@ -68,8 +76,8 @@ def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
             "ts": ts,
             "yes_price": yes_price,
             "no_price": no_price,
-            "volume_24h": market.get("volume24hr") or market.get("volume"),
-            "liquidity": market.get("liquidity"),
+            "volume_24h": m["volume24hr"],
+            "liquidity": m["liquidity"],
         })
 
     return rows
