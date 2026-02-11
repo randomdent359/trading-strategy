@@ -1,0 +1,44 @@
+assets: [BTC, ETH, SOL]
+
+exchanges:
+  hyperliquid:
+    base_url: https://api.hyperliquid.xyz
+    poll_interval_s: 5
+  polymarket:
+    base_url: https://clob.polymarket.com
+    poll_interval_s: 10
+
+database:
+  # Override with TRADING_DATABASE_URL env var in production
+  url: postgresql://trading:trading@localhost:5432/trading
+
+strategies:
+  contrarian_pure:
+    enabled: true
+    params:
+      threshold: 0.72
+  contrarian_strength:
+    enabled: true
+    params:
+      threshold: 0.80
+  funding_rate:
+    enabled: true
+    params:
+      threshold: 0.0012
+  funding_oi:
+    enabled: true
+    params:
+      funding_threshold: 0.0015
+      oi_pct: 85
+
+logging:
+  level: INFO
+  # "json" for production, "console" for development
+  format: json
+
+paper:
+  initial_capital: 10000
+  risk_pct: 0.02
+  default_stop_loss_pct: 0.02
+  default_take_profit_pct: 0.04
+  default_timeout_minutes: 60
