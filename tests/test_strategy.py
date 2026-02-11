@@ -58,6 +58,52 @@ class TestStrategyABC:
         snap = MarketSnapshot(asset="BTC", ts=NOW)
         assert s.evaluate(snap) is None
 
+    def test_params_stored(self):
+        class ParamStrategy(Strategy):
+            name = "param_test"
+            assets = ["BTC"]
+            exchanges = ["hyperliquid"]
+            interval = "1m"
+
+            def evaluate(self, snapshot: MarketSnapshot) -> Signal | None:
+                return None
+
+        s = ParamStrategy(threshold=0.72, period=14)
+        assert s.params == {"threshold": 0.72, "period": 14}
+
+    def test_params_default_empty(self):
+        class NoParamStrategy(Strategy):
+            name = "no_param"
+            assets = ["BTC"]
+            exchanges = ["hyperliquid"]
+            interval = "1m"
+
+            def evaluate(self, snapshot: MarketSnapshot) -> Signal | None:
+                return None
+
+        s = NoParamStrategy()
+        assert s.params == {}
+
+    def test_params_accessible_via_get(self):
+        class GetParamStrategy(Strategy):
+            name = "get_param"
+            assets = ["BTC"]
+            exchanges = ["hyperliquid"]
+            interval = "1m"
+
+            def __init__(self, **params):
+                super().__init__(**params)
+                self.threshold = float(self.params.get("threshold", 0.5))
+
+            def evaluate(self, snapshot: MarketSnapshot) -> Signal | None:
+                return None
+
+        s = GetParamStrategy(threshold=0.72)
+        assert s.threshold == 0.72
+
+        s_default = GetParamStrategy()
+        assert s_default.threshold == 0.5
+
 
 class TestRegistry:
     def setup_method(self):
