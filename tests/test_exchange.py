@@ -46,3 +46,9 @@ class TestPolymarketClient:
     def test_classify_asset_unrelated(self):
         assert PolymarketClient.classify_asset("US election 2026") is None
         assert PolymarketClient.classify_asset("Will it rain tomorrow?") is None
+
+    def test_classify_asset_rejects_substring_matches(self):
+        assert PolymarketClient.classify_asset("Senator guilty of soliciting a child?") is None
+        assert PolymarketClient.classify_asset("Next Prime Minister of the Netherlands?") is None
+        assert PolymarketClient.classify_asset("Will the method work?") is None
+        assert PolymarketClient.classify_asset("Solving world hunger") is None

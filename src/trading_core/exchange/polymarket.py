@@ -112,12 +112,16 @@ class PolymarketClient:
 
     @staticmethod
     def classify_asset(title: str) -> str | None:
-        """Extract the asset symbol from a market title, or None if unrelated."""
-        t = title.upper()
-        if "BTC" in t or "BITCOIN" in t:
+        """Extract the asset symbol from a market title, or None if unrelated.
+
+        Uses word-boundary matching to avoid false positives like
+        "SOL" in "soliciting" or "ETH" in "Netherlands".
+        """
+        import re
+        if re.search(r'\bBTC\b|\bBitcoin\b', title, re.IGNORECASE):
             return "BTC"
-        if "ETH" in t or "ETHEREUM" in t:
+        if re.search(r'\bETH\b|\bEthereum\b', title, re.IGNORECASE):
             return "ETH"
-        if "SOL" in t or "SOLANA" in t:
+        if re.search(r'\bSOL\b|\bSolana\b', title, re.IGNORECASE):
             return "SOL"
         return None
