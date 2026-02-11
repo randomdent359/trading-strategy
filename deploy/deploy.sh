@@ -98,8 +98,8 @@ echo "Package version:"
 python3 -c "import trading_core; print(f'  trading-core {trading_core.__version__}')" 2>/dev/null || echo "  WARNING: trading-core not importable"
 
 echo ""
-echo "Service Status (new collectors):"
-for svc in hyperliquid-collector polymarket-collector; do
+echo "Service Status (new services):"
+for svc in hyperliquid-collector polymarket-collector strategy-orchestrator; do
   status=$(sudo systemctl is-enabled "$svc" 2>/dev/null || echo "not found")
   active=$(sudo systemctl is-active "$svc" 2>/dev/null || echo "inactive")
   echo "  $svc: enabled=$status active=$active"
@@ -122,6 +122,6 @@ echo ""
 echo "Deployment complete!"
 echo ""
 echo "Next steps:"
-echo "  Start new collectors:  sudo systemctl start hyperliquid-collector polymarket-collector"
-echo "  View logs:             journalctl -u hyperliquid-collector -f"
-echo "  Check status:          sudo systemctl status hyperliquid-collector polymarket-collector"
+echo "  Start new services:    sudo systemctl start hyperliquid-collector polymarket-collector strategy-orchestrator"
+echo "  View logs:             journalctl -u strategy-orchestrator -f"
+echo "  Check status:          sudo systemctl status hyperliquid-collector polymarket-collector strategy-orchestrator"
