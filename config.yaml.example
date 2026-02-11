@@ -30,6 +30,22 @@ strategies:
     params:
       funding_threshold: 0.0015
       oi_pct: 85
+  rsi_mean_reversion:
+    enabled: true
+    params:
+      period: 14
+      overbought: 75
+      oversold: 25
+  funding_arb:
+    enabled: true
+    params:
+      threshold: 0.0005
+  momentum_breakout:
+    enabled: true
+    params:
+      bb_period: 20
+      bb_std: 2
+      volume_mult: 1.5
 
 logging:
   level: INFO
