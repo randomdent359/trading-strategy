@@ -1,22 +1,27 @@
-"""Polymarket exchange client — REST API.
-
-Supports both the gamma API (gamma-api.polymarket.com) and the CLOB API
-(clob.polymarket.com). The gamma API is preferred — it returns richer
-market objects with outcomePrices already included.
-
-The CLOB API wraps results in {"data": [...], "next_cursor": "..."}
-and uses snake_case field names (condition_id vs conditionId).
-"""
+"""Polymarket exchange client — gamma API (/events with tag filtering)."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
 
+# Tag IDs for crypto-related event filtering on the gamma API.
+TAG_IDS = {
+    "crypto_prices": 1312,
+    "bitcoin": 235,
+    "ethereum": 39,
+    "solana": 818,
+    "up_or_down": 102127,
+}
+
+# Default tags to query — covers price targets and short-term up/down markets.
+DEFAULT_TAG_IDS = [1312, 235, 39, 818, 102127]
+
 
 class PolymarketClient:
-    """Async client for the Polymarket API."""
+    """Async client for the Polymarket gamma API."""
 
     def __init__(self, base_url: str = "https://gamma-api.polymarket.com"):
         self.base_url = base_url.rstrip("/")
@@ -31,74 +36,71 @@ class PolymarketClient:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def get_markets(self, limit: int = 100) -> list[dict]:
-        """Fetch active prediction markets (paginated).
+    async def get_events(
+        self,
+        tag_id: int,
+        limit: int = 100,
+        closed: bool = False,
+    ) -> list[dict]:
+        """Fetch events for a given tag, paginated.
 
-        Handles both response formats:
-        - Gamma API: returns a bare list of market dicts
-        - CLOB API: returns {"data": [...], "next_cursor": "..."}
+        Each event contains a nested ``markets`` list with individual
+        prediction markets including outcomePrices.
         """
         http = await self._get_http()
-        all_markets: list[dict] = []
+        all_events: list[dict] = []
         offset = 0
-        next_cursor: str | None = None
 
         while True:
-            params: dict[str, Any] = {"limit": limit}
+            params: dict[str, Any] = {
+                "tag_id": tag_id,
+                "closed": str(closed).lower(),
+                "limit": limit,
+            }
+            if offset > 0:
+                params["offset"] = offset
 
-            if next_cursor is not None:
-                # CLOB-style cursor pagination
-                params["next_cursor"] = next_cursor
-            else:
-                params["closed"] = "false"
-                if offset > 0:
-                    params["offset"] = offset
-
-            resp = await http.get(f"{self.base_url}/markets", params=params)
+            resp = await http.get(f"{self.base_url}/events", params=params)
             resp.raise_for_status()
-            body = resp.json()
+            page = resp.json()
 
-            # Detect response format
-            if isinstance(body, dict) and "data" in body:
-                # CLOB API format: {"data": [...], "next_cursor": "..."}
-                page = body["data"]
-                next_cursor = body.get("next_cursor") or None
-                if not page:
-                    break
-                all_markets.extend(page)
-                if next_cursor is None or next_cursor == "LTE=":
-                    break
-            elif isinstance(body, list):
-                # Gamma API format: bare list
-                if not body:
-                    break
-                all_markets.extend(body)
-                if len(body) < limit:
-                    break
-                offset += limit
-                next_cursor = None
-            else:
+            if not isinstance(page, list) or not page:
                 break
 
-        return all_markets
+            all_events.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
 
-    @staticmethod
-    def normalize_market(market: dict) -> dict:
-        """Normalize a market dict to use consistent camelCase field names.
+        return all_events
 
-        The CLOB API uses snake_case (condition_id, question_id) while
-        the gamma API uses camelCase (conditionId, questionID). This
-        normalizes to the gamma API convention.
+    async def get_crypto_markets(
+        self,
+        tag_ids: list[int] | None = None,
+    ) -> list[dict]:
+        """Fetch markets from multiple crypto-related tags.
+
+        Queries /events for each tag, extracts nested markets, and
+        deduplicates by conditionId.
         """
-        return {
-            "conditionId": market.get("conditionId") or market.get("condition_id", ""),
-            "question": market.get("question", ""),
-            "title": market.get("title", ""),
-            "outcomePrices": market.get("outcomePrices", []),
-            "volume24hr": market.get("volume24hr") or market.get("volume", 0),
-            "liquidity": market.get("liquidity") or market.get("liquidityNum", 0),
-            "id": market.get("id", ""),
-        }
+        if tag_ids is None:
+            tag_ids = DEFAULT_TAG_IDS
+
+        seen: set[str] = set()
+        all_markets: list[dict] = []
+
+        for tag_id in tag_ids:
+            events = await self.get_events(tag_id)
+            for event in events:
+                for market in event.get("markets", []):
+                    if not isinstance(market, dict):
+                        continue
+                    cid = market.get("conditionId", "")
+                    if cid and cid not in seen:
+                        seen.add(cid)
+                        all_markets.append(market)
+
+        return all_markets
 
     @staticmethod
     def parse_outcome_prices(raw: Any) -> list[float]:
@@ -117,7 +119,6 @@ class PolymarketClient:
         Uses word-boundary matching to avoid false positives like
         "SOL" in "soliciting" or "ETH" in "Netherlands".
         """
-        import re
         if re.search(r'\bBTC\b|\bBitcoin\b', title, re.IGNORECASE):
             return "BTC"
         if re.search(r'\bETH\b|\bEthereum\b', title, re.IGNORECASE):

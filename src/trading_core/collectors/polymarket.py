@@ -1,5 +1,9 @@
 """Polymarket data collector — REST polling for prediction markets.
 
+Fetches crypto-related events from the gamma API /events endpoint
+using tag-based filtering (crypto-prices, bitcoin, ethereum, solana,
+up-or-down), extracts nested markets, and writes snapshots to Postgres.
+
 Run: python -m trading_core.collectors polymarket [--config config.yaml]
 """
 
@@ -7,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -37,11 +40,10 @@ def _upsert_market(session: Session, row: dict) -> None:
 
 
 def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
-    """Filter and transform raw market dicts into DB-ready rows.
+    """Filter and transform market dicts into DB-ready rows.
 
-    Accepts the flat list returned by get_markets() — works with both
-    gamma API (camelCase) and CLOB API (snake_case) field names.
-    Skips non-dict items defensively.
+    Accepts the flat list of market dicts returned by get_crypto_markets()
+    (already extracted from /events responses and deduplicated).
     """
     rows: list[dict] = []
     ts = datetime.now(timezone.utc)
@@ -50,10 +52,7 @@ def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
         if not isinstance(market, dict):
             continue
 
-        # Normalize to handle both gamma (camelCase) and CLOB (snake_case)
-        m = PolymarketClient.normalize_market(market)
-
-        title = m["question"] or m["title"]
+        title = market.get("question", "") or market.get("title", "")
         if not title:
             continue
 
@@ -61,11 +60,11 @@ def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
         if asset is None or asset not in assets:
             continue
 
-        prices = PolymarketClient.parse_outcome_prices(m["outcomePrices"])
+        prices = PolymarketClient.parse_outcome_prices(market.get("outcomePrices", []))
         yes_price = prices[0] if len(prices) > 0 else None
         no_price = prices[1] if len(prices) > 1 else None
 
-        market_id = m["conditionId"] or m["id"]
+        market_id = market.get("conditionId", "") or market.get("condition_id", "")
         if not market_id:
             continue
 
@@ -76,8 +75,8 @@ def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
             "ts": ts,
             "yes_price": yes_price,
             "no_price": no_price,
-            "volume_24h": m["volume24hr"],
-            "liquidity": m["liquidity"],
+            "volume_24h": market.get("volume24hr") or market.get("volume"),
+            "liquidity": market.get("liquidity"),
         })
 
     return rows
@@ -92,14 +91,14 @@ async def poll_markets(
     """Poll Polymarket for crypto-related prediction markets."""
     while True:
         try:
-            log.info("polling polymarket markets")
-            market_data = await client.get_markets()
+            log.info("polling polymarket events by tag")
+            market_data = await client.get_crypto_markets()
             rows = _extract_markets(market_data, assets)
 
             for row in rows:
                 _upsert_market(session, row)
 
-            log.info("polymarket poll complete", markets_found=len(rows))
+            log.info("polymarket poll complete", markets_found=len(rows), total_fetched=len(market_data))
 
         except Exception:
             log.exception("polymarket poll failed")
