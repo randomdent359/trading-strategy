@@ -37,7 +37,7 @@ class PolymarketClient:
     @staticmethod
     def parse_outcome_prices(raw: Any) -> list[float]:
         """Parse outcomePrices which may be a JSON string or a list."""
-        if isinstance(raw, str):
+        if isinstance(raw, str) and raw.strip():
             import json
             return [float(x) for x in json.loads(raw)]
         if isinstance(raw, list):
