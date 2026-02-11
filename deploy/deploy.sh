@@ -6,120 +6,122 @@ set -e
 # Configuration
 REMOTE_HOST="rdent@10.3.101.5"
 TRADING_HOME="/home/rdent/trading"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "🚀 Deploying trading strategy to anjie..."
+echo "Deploying trading strategy to anjie..."
 echo ""
 
 # Create remote directories if needed
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
 mkdir -p ~/trading/{polymarket,hyperliquid,common}/{scripts,logs,data}
 mkdir -p ~/trading/systemd
+mkdir -p ~/trading/repo
 EOFSH
 
-echo "✓ Remote directories created"
+echo "Remote directories created"
 echo ""
 
-# Deploy Polymarket scripts
-echo "📝 Deploying Polymarket scripts..."
-ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" "mkdir -p ~/trading/polymarket/scripts"
+# --- trading-core package ---
+echo "Deploying trading-core package..."
+rsync -az --delete \
+  -e "ssh -i ~/.ssh/id_ed25519" \
+  "${REPO_DIR}/src/" "${REPO_DIR}/pyproject.toml" \
+  "${REMOTE_HOST}:${TRADING_HOME}/repo/"
+echo "Package files synced"
+
+# Deploy config (don't overwrite if already customised)
+scp -i ~/.ssh/id_ed25519 "${REPO_DIR}/config.yaml.example" "${REMOTE_HOST}:${TRADING_HOME}/config.yaml.example"
+ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" \
+  "test -f ~/trading/config.yaml || cp ~/trading/config.yaml.example ~/trading/config.yaml"
+echo "Config deployed"
+
+# Install/upgrade the package
+ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
+cd ~/trading/repo
+pip install --user --quiet --upgrade . 2>&1 | tail -3
+echo "trading-core package installed"
+EOFSH
+
+echo ""
+
+# --- Legacy scripts (kept until Stage 2 strategies are verified) ---
+echo "Deploying legacy scripts..."
 scp -i ~/.ssh/id_ed25519 scripts/polymarket/*.py "${REMOTE_HOST}:${TRADING_HOME}/polymarket/scripts/"
-echo "✓ Polymarket scripts deployed"
-echo ""
-
-# Deploy Hyperliquid scripts
-echo "📝 Deploying Hyperliquid scripts..."
-ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" "mkdir -p ~/trading/hyperliquid/scripts"
 scp -i ~/.ssh/id_ed25519 scripts/hyperliquid/*.py "${REMOTE_HOST}:${TRADING_HOME}/hyperliquid/scripts/"
-echo "✓ Hyperliquid scripts deployed"
-echo ""
-
-# Deploy common scripts
-echo "📝 Deploying common scripts..."
-ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" "mkdir -p ~/trading/common/scripts"
 scp -i ~/.ssh/id_ed25519 scripts/common/*.py "${REMOTE_HOST}:${TRADING_HOME}/common/scripts/"
-echo "✓ Common scripts deployed"
+echo "Legacy scripts deployed"
 echo ""
 
-# Deploy systemd services
-echo "📝 Deploying systemd services..."
-ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" "mkdir -p ~/trading/systemd"
+# --- Systemd services ---
+echo "Deploying systemd services..."
 scp -i ~/.ssh/id_ed25519 systemd/*.service "${REMOTE_HOST}:${TRADING_HOME}/systemd/"
-echo "✓ Systemd services deployed"
-echo ""
+echo "Service files copied"
 
-# Install systemd services
-echo "🔧 Installing systemd services..."
+echo "Installing systemd services..."
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
 
 for service in ~/trading/systemd/*.service; do
   service_name=$(basename "$service")
-  
-  # Copy to systemd directory
   sudo cp "$service" /etc/systemd/system/
-  
-  # Enable service
-  sudo systemctl daemon-reload
-  sudo systemctl enable "$service_name"
-  
-  echo "✓ $service_name installed"
+  echo "  $service_name installed"
+done
+
+sudo systemctl daemon-reload
+
+for service in ~/trading/systemd/*.service; do
+  service_name=$(basename "$service")
+  sudo systemctl enable "$service_name" 2>/dev/null
 done
 
 EOFSH
 
-echo "✓ Systemd services installed"
+echo "Systemd services installed"
 echo ""
 
-# Set permissions
-echo "🔐 Setting permissions..."
+# --- Permissions ---
+echo "Setting permissions..."
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
-
-# Make scripts executable
-chmod +x ~/trading/polymarket/scripts/*.py
-chmod +x ~/trading/hyperliquid/scripts/*.py
-chmod +x ~/trading/common/scripts/*.py
-
-# Create log files if they don't exist
-mkdir -p ~/trading/polymarket/logs
-mkdir -p ~/trading/hyperliquid/logs
-mkdir -p ~/trading/common/logs
-
-# Create data directories
-mkdir -p ~/trading/polymarket/data
-mkdir -p ~/trading/hyperliquid/data
-mkdir -p ~/trading/common/data
-
-echo "✓ Permissions set"
-
+chmod +x ~/trading/polymarket/scripts/*.py 2>/dev/null || true
+chmod +x ~/trading/hyperliquid/scripts/*.py 2>/dev/null || true
+chmod +x ~/trading/common/scripts/*.py 2>/dev/null || true
 EOFSH
 
-echo "✓ Permissions configured"
+echo "Permissions set"
 echo ""
 
-# Verify deployment
-echo "✅ Verifying deployment..."
+# --- Verify ---
+echo "Verifying deployment..."
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
 
 echo ""
-echo "📊 Service Status:"
-sudo systemctl status --no-pager contrarian-monitor \
-  polymarket-strength-filtered \
-  hyperliquid-funding \
-  hyperliquid-funding-oi \
-  paper-trader 2>/dev/null || true
+echo "Package version:"
+python3 -c "import trading_core; print(f'  trading-core {trading_core.__version__}')" 2>/dev/null || echo "  WARNING: trading-core not importable"
 
 echo ""
-echo "📁 Script Files:"
-find ~/trading -name "*.py" -type f | sort
+echo "Service Status (new collectors):"
+for svc in hyperliquid-collector polymarket-collector; do
+  status=$(sudo systemctl is-enabled "$svc" 2>/dev/null || echo "not found")
+  active=$(sudo systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+  echo "  $svc: enabled=$status active=$active"
+done
 
 echo ""
-echo "✓ Deployment verification complete"
+echo "Service Status (legacy):"
+for svc in contrarian-monitor polymarket-strength-filtered hyperliquid-funding hyperliquid-funding-oi paper-trader; do
+  status=$(sudo systemctl is-enabled "$svc" 2>/dev/null || echo "not found")
+  active=$(sudo systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+  echo "  $svc: enabled=$status active=$active"
+done
+
+echo ""
+echo "Deployment verification complete"
 
 EOFSH
 
 echo ""
-echo "🎉 Deployment complete!"
+echo "Deployment complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Start individual services: sudo systemctl start <service-name>"
-echo "  2. View logs: tail -f ~/trading/<platform>/logs/*.log"
-echo "  3. Check status: sudo systemctl status <service-name>"
+echo "  Start new collectors:  sudo systemctl start hyperliquid-collector polymarket-collector"
+echo "  View logs:             journalctl -u hyperliquid-collector -f"
+echo "  Check status:          sudo systemctl status hyperliquid-collector polymarket-collector"

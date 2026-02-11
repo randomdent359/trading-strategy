@@ -36,48 +36,41 @@ def _upsert_market(session: Session, row: dict) -> None:
     session.commit()
 
 
-def _extract_markets_from_series(series_data: list[dict], assets: list[str]) -> list[dict]:
-    """Parse the gamma API series response into flat market snapshot rows.
+def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
+    """Filter and transform raw market dicts into DB-ready rows.
 
-    The API returns series, each containing multiple markets (events).
-    We extract individual markets whose titles match our target assets.
+    Accepts the flat list returned by the gamma API /markets endpoint.
+    Each dict has question, outcomePrices, conditionId, volume24hr, etc.
     """
     rows: list[dict] = []
     ts = datetime.now(timezone.utc)
 
-    for series in series_data:
-        # Series may contain markets at top level or nested under "markets"
-        markets = series.get("markets", [])
-        if not markets and "title" in series:
-            markets = [series]
+    for market in market_data:
+        title = market.get("question", "") or market.get("title", "")
+        asset = PolymarketClient.classify_asset(title)
+        if asset is None or asset not in assets:
+            continue
 
-        for market in markets:
-            title = market.get("question", "") or market.get("title", "")
-            asset = PolymarketClient.classify_asset(title)
-            if asset is None or asset not in assets:
-                continue
+        raw_prices = market.get("outcomePrices", [])
+        prices = PolymarketClient.parse_outcome_prices(raw_prices)
 
-            # Parse outcome prices
-            raw_prices = market.get("outcomePrices", [])
-            prices = PolymarketClient.parse_outcome_prices(raw_prices)
+        yes_price = prices[0] if len(prices) > 0 else None
+        no_price = prices[1] if len(prices) > 1 else None
 
-            yes_price = prices[0] if len(prices) > 0 else None
-            no_price = prices[1] if len(prices) > 1 else None
+        market_id = market.get("conditionId", "") or market.get("id", "")
+        if not market_id:
+            continue
 
-            market_id = market.get("conditionId", "") or market.get("id", "")
-            if not market_id:
-                continue
-
-            rows.append({
-                "market_id": str(market_id),
-                "market_title": title[:500],
-                "asset": asset,
-                "ts": ts,
-                "yes_price": yes_price,
-                "no_price": no_price,
-                "volume_24h": market.get("volume24hr") or market.get("volume"),
-                "liquidity": market.get("liquidity"),
-            })
+        rows.append({
+            "market_id": str(market_id),
+            "market_title": title[:500],
+            "asset": asset,
+            "ts": ts,
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "volume_24h": market.get("volume24hr") or market.get("volume"),
+            "liquidity": market.get("liquidity"),
+        })
 
     return rows
 
@@ -92,8 +85,8 @@ async def poll_markets(
     while True:
         try:
             log.info("polling polymarket markets")
-            series_data = await client.get_markets()
-            rows = _extract_markets_from_series(series_data, assets)
+            market_data = await client.get_markets()
+            rows = _extract_markets(market_data, assets)
 
             for row in rows:
                 _upsert_market(session, row)

@@ -27,12 +27,31 @@ class PolymarketClient:
         if self._http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def get_markets(self) -> list[dict]:
-        """Fetch all active prediction market series."""
+    async def get_markets(self, limit: int = 100) -> list[dict]:
+        """Fetch active prediction markets (paginated).
+
+        Uses the /markets endpoint which returns individual markets with
+        outcomePrices, volume, liquidity, and conditionId fields.
+        """
         http = await self._get_http()
-        resp = await http.get(f"{self.base_url}/series")
-        resp.raise_for_status()
-        return resp.json()
+        all_markets: list[dict] = []
+        offset = 0
+
+        while True:
+            resp = await http.get(
+                f"{self.base_url}/markets",
+                params={"closed": "false", "limit": limit, "offset": offset},
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if not page:
+                break
+            all_markets.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+
+        return all_markets
 
     @staticmethod
     def parse_outcome_prices(raw: Any) -> list[float]:

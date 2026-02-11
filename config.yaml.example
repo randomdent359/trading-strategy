@@ -5,8 +5,8 @@ exchanges:
     base_url: https://api.hyperliquid.xyz
     poll_interval_s: 5
   polymarket:
-    base_url: https://clob.polymarket.com
-    poll_interval_s: 10
+    base_url: https://gamma-api.polymarket.com
+    poll_interval_s: 600
 
 database:
   # Override with TRADING_DATABASE_URL env var in production
