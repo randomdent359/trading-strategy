@@ -1,0 +1,26 @@
+[Unit]
+Description=Polymarket Contrarian Monitor (>72% consensus)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rdent
+Group=rdent
+WorkingDirectory=/home/rdent/trading/polymarket
+
+ExecStart=/usr/bin/python3 /home/rdent/trading/polymarket/scripts/contrarian-monitor.py
+
+Restart=on-failure
+RestartSec=10
+
+Environment="PATH=/usr/local/bin:/usr/bin"
+StandardOutput=append:/home/rdent/trading/polymarket/logs/contrarian-monitor.log
+StandardError=append:/home/rdent/trading/polymarket/logs/contrarian-monitor.log
+
+NoNewPrivileges=true
+ProtectSystem=no
+ProtectHome=no
+
+[Install]
+WantedBy=multi-user.target

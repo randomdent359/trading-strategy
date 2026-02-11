@@ -1,0 +1,27 @@
+[Unit]
+Description=Hyperliquid Funding Rate Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rdent
+Group=rdent
+WorkingDirectory=/home/rdent/trading/hyperliquid
+
+ExecStart=/usr/bin/python3 /home/rdent/trading/hyperliquid/scripts/funding-monitor.py
+
+Restart=on-failure
+RestartSec=10
+
+Environment="PATH=/usr/local/bin:/usr/bin"
+StandardOutput=append:/home/rdent/trading/hyperliquid/logs/funding-monitor.log
+StandardError=append:/home/rdent/trading/hyperliquid/logs/funding-monitor.log
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=no
+ProtectHome=no
+
+[Install]
+WantedBy=multi-user.target

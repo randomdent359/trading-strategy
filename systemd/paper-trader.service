@@ -1,0 +1,26 @@
+[Unit]
+Description=Paper Trading Automation (listens to all 4 alert streams)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rdent
+Group=rdent
+WorkingDirectory=/home/rdent/trading
+
+ExecStart=/usr/bin/python3 /home/rdent/trading/common/scripts/paper-trader.py
+
+Restart=on-failure
+RestartSec=10
+
+Environment="PATH=/usr/local/bin:/usr/bin"
+StandardOutput=append:/home/rdent/trading/common/logs/paper-trader.log
+StandardError=append:/home/rdent/trading/common/logs/paper-trader.log
+
+NoNewPrivileges=true
+ProtectSystem=no
+ProtectHome=no
+
+[Install]
+WantedBy=multi-user.target
