@@ -15,8 +15,8 @@ Restart=on-failure
 RestartSec=10
 
 Environment="PATH=/usr/local/bin:/usr/bin"
-StandardOutput=append:/home/rdent/trading/common/logs/paper-trader.log
-StandardError=append:/home/rdent/trading/common/logs/paper-trader.log
+StandardOutput=journal
+StandardError=journal
 
 NoNewPrivileges=true
 ProtectSystem=no
