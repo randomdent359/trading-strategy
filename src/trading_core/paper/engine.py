@@ -82,15 +82,15 @@ class PaperEngine:
     # ── Signal consumption ────────────────────────────────────
 
     def consume_signals(self, session: Session) -> list[SignalRow]:
-        """Fetch unacted signals, mark them acted_on, return the list.
+        """Fetch unacted Hyperliquid signals, mark them acted_on, return the list.
 
-        When oracle is present, consumes all exchanges. Otherwise HL-only.
+        Only Hyperliquid signals are consumed — Polymarket signals are
+        informational (probability-based prices break position sizing).
         """
         query = session.query(SignalRow).filter(
             SignalRow.acted_on == False,  # noqa: E712
+            SignalRow.exchange == "hyperliquid",
         )
-        if self.oracle is None:
-            query = query.filter(SignalRow.exchange == "hyperliquid")
         rows = query.order_by(SignalRow.ts).all()
         for row in rows:
             row.acted_on = True
