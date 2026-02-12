@@ -113,7 +113,7 @@ echo ""
 # --- Restart active services ---
 echo "Restarting services that were running..."
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
-ALL_SERVICES="hyperliquid-collector polymarket-collector strategy-orchestrator paper-engine contrarian-monitor polymarket-strength-filtered hyperliquid-funding hyperliquid-funding-oi paper-trader"
+ALL_SERVICES="hyperliquid-collector polymarket-collector strategy-orchestrator paper-engine trading-api contrarian-monitor polymarket-strength-filtered hyperliquid-funding hyperliquid-funding-oi paper-trader"
 restarted=""
 for svc in $ALL_SERVICES; do
   if sudo systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -139,7 +139,7 @@ python3 -c "import trading_core; print(f'  trading-core {trading_core.__version_
 
 echo ""
 echo "Service Status (new services):"
-for svc in hyperliquid-collector polymarket-collector strategy-orchestrator paper-engine; do
+for svc in hyperliquid-collector polymarket-collector strategy-orchestrator paper-engine trading-api; do
   status=$(sudo systemctl is-enabled "$svc" 2>/dev/null || echo "not found")
   active=$(sudo systemctl is-active "$svc" 2>/dev/null || echo "inactive")
   echo "  $svc: enabled=$status active=$active"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Trading Dashboard API
+After=network.target
+
+[Service]
+Type=simple
+User=rdent
+WorkingDirectory=/home/rdent/trading
+Environment="TRADING_DATABASE_URL=postgresql://rdent@10.6.0.146:5432/rdent?sslmode=verify-full&sslcert=/etc/pki/tls/misc/anjie.kosherinata.internal-rsa.pem&sslkey=/etc/pki/tls/private/anjie.kosherinata.internal-rsa.pem&sslrootcert=/etc/pki/ca-trust/source/anchors/ca.internal-rsa.pem"
+ExecStart=/usr/bin/python3 -m trading_core.api.runner
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
