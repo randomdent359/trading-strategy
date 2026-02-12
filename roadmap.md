@@ -33,7 +33,7 @@ A system that:
 
 ---
 
-## Stage 0 — Foundations (prerequisite refactor)
+## Stage 0 — Foundations (prerequisite refactor) ✅ COMPLETE
 
 **Goal:** Establish the shared infrastructure that every later stage depends on.
 
@@ -81,9 +81,11 @@ Replace print/file logging with structured logging (Python `structlog`). Every l
 
 **Deliverables:** `trading-core` package skeleton, Alembic migrations for all three schemas, `config.yaml` template, structured logging wired up.
 
+**Status:** Complete. Package at `src/trading_core/`, Alembic migrations in `migrations/versions/`, `config.yaml.example` with full schema, structlog JSON logging.
+
 ---
 
-## Stage 1 — Real Market Data Ingestion
+## Stage 1 — Real Market Data Ingestion ✅ COMPLETE
 
 **Goal:** Continuously capture real price, funding, and OI data into Postgres so strategies can query it.
 
@@ -150,9 +152,11 @@ CREATE TABLE trading_market_data.polymarket_markets (
 
 **Deliverables:** `hyperliquid_collector.py`, `polymarket_collector.py`, corresponding systemd services, verified data flowing into Postgres.
 
+**Status:** Complete. Both collectors running on anjie. Hyperliquid: WebSocket candles + REST funding/OI polling (~6s). Polymarket: REST polling (~60s cycles, ~1493 markets). Data verified flowing into `trading_market_data.candles`, `funding_snapshots`, `polymarket_markets`.
+
 ---
 
-## Stage 2 — Strategy Framework and Signal Generation
+## Stage 2 — Strategy Framework and Signal Generation ✅ COMPLETE
 
 **Goal:** A pluggable strategy framework where each strategy is a Python class that receives market data and emits signals.
 
@@ -249,13 +253,15 @@ A single process that:
 
 **Deliverables:** `Strategy` ABC, registry, 4 ported strategies + 3 new ones, orchestrator process, signals table populated.
 
+**Status:** Complete. 7 strategies live: `contrarian_pure`, `contrarian_strength`, `funding_rate`, `funding_oi`, `rsi_mean_reversion`, `funding_arb`, `momentum_breakout`. Orchestrator runs every ~10min, emitting signals to `trading_signals.signals`. Strategies are in `src/trading_core/strategy/strategies/`.
+
 ---
 
-## Stage 3 — Paper Trading Engine
+## Stage 3 — Paper Trading Engine ✅ COMPLETE (except 3.4)
 
 **Goal:** Consume signals and manage a realistic paper portfolio in Postgres with proper position tracking.
 
-**Status:** Implemented. Hyperliquid positions only. Polymarket signals remain informational — a price oracle service is needed before PM positions are viable (see Future Work below).
+**Status:** Core engine, risk controls, and Kelly sizing all implemented and live. Only slippage/fee simulation (3.4) remains. Hyperliquid positions only — Polymarket signals remain informational until a price oracle service is built (see Future Work).
 
 **Price source (stopgap):** Latest candle close from `trading_market_data.candles` (not live API). Approximately ~5s stale from the collector write cycle. This is acceptable for paper trading with 5s tick intervals. A dedicated price oracle service should replace this when real-time pricing becomes critical (e.g., live trading or sub-second exit triggers).
 
@@ -318,11 +324,34 @@ Replaces the current `paper-trader.py`. Responsibilities:
 6. **On exit:** Calculate realised P&L from real entry and exit prices, update position status, write to DB
 7. **No simulated randomness** — P&L is entirely determined by real price movement between entry and exit
 
-### 3.3 Risk controls
-- Max concurrent positions per strategy (default 3)
-- Max total exposure as % of equity (default 50%)
-- Max loss per day per strategy — pause strategy for rest of day if hit
-- Cooldown period after a loss (configurable, default 5 minutes)
+### 3.3 Risk controls ✅ COMPLETE
+
+Implemented in `src/trading_core/paper/risk.py` and integrated into the paper engine. All state is in-memory (resets on restart, acceptable for paper trading).
+
+**Risk gate** (evaluated in priority order before every position open):
+1. Daily loss pause — if strategy's net daily loss exceeds `max_daily_loss_per_strategy` ($500 default), reject until next UTC day
+2. Cooldown — if strategy had a loss within `cooldown_after_loss_minutes` (5 min default), reject
+3. Max positions per strategy — if strategy has >= `max_positions_per_strategy` (3 default) open positions, reject
+4. Total exposure cap — if total notional exposure would exceed `max_total_exposure_pct` (50% default) of equity, reject
+
+**Kelly criterion** for confidence-weighted position sizing (`src/trading_core/paper/sizing.py`):
+- `b = take_profit_pct / stop_loss_pct` (reward-to-risk ratio, default 2.0)
+- `kelly = (confidence * b - (1 - confidence)) / b`
+- `adjusted = kelly * safety_factor` (half-Kelly, `kelly_safety_factor=0.5`)
+- `risk_pct = min(adjusted, config.risk_pct)` — Kelly only reduces size, never increases
+- Enabled by default (`kelly_enabled: true`). Signals with confidence < ~0.33 get zero size (no bet).
+
+Config fields (all in `PaperConfig`):
+```yaml
+max_positions_per_strategy: 3
+max_total_exposure_pct: 0.50
+max_daily_loss_per_strategy: 500.0
+cooldown_after_loss_minutes: 5
+kelly_enabled: true
+kelly_safety_factor: 0.5
+```
+
+36 tests in `tests/test_risk.py` covering Kelly math, risk checks, tracker state machine, and engine integration.
 
 ### 3.4 Slippage and fee simulation
 - Apply configurable slippage to entry and exit prices (default 0.05% for Hyperliquid, 0.5% for Polymarket)
@@ -457,18 +486,16 @@ This should be tracked as a separate issue and is a prerequisite for Polymarket 
 
 ## Implementation Order and Rough Effort
 
-| Stage | Description | Depends on | Rough effort |
+| Stage | Description | Depends on | Status |
 |---|---|---|---|
-| **0** | Foundations (package, Postgres, config, logging) | — | 3–4 days |
-| **1** | Market data ingestion | Stage 0 | 3–4 days |
-| **2** | Strategy framework + signal generation | Stage 0, 1 | 4–5 days |
-| **3** | Paper trading engine | Stage 1, 2 | 4–5 days |
-| **4** | Dashboard visualisation | Stage 3 | 5–7 days |
-| **5** | Plugin system and DX | Stage 2, 3 | 3–4 days |
+| **0** | Foundations (package, Postgres, config, logging) | — | ✅ Complete |
+| **1** | Market data ingestion | Stage 0 | ✅ Complete |
+| **2** | Strategy framework + signal generation | Stage 0, 1 | ✅ Complete |
+| **3** | Paper trading engine | Stage 1, 2 | ✅ Complete (3.4 slippage/fees remaining) |
+| **4** | Dashboard visualisation | Stage 3 | TODO |
+| **5** | Plugin system and DX | Stage 2, 3 | TODO |
 
-Stages 0–3 are the critical path. Stage 4 can begin in parallel once Stage 3 is producing data. Stage 5 can be done incrementally.
-
-**Total estimate: ~3–4 weeks of focused work** (one person or one LLM agent session per stage).
+Stages 0–3 are complete and running in production on anjie. Stage 4 can begin now — Stage 3 is producing positions and MTM data. Stage 5 can be done incrementally.
 
 ---
 
