@@ -138,6 +138,7 @@ CREATE TABLE trading_market_data.polymarket_markets (
     no_price        NUMERIC,
     volume_24h      NUMERIC,
     liquidity       NUMERIC,
+    end_date        TIMESTAMPTZ,          -- market resolution date from API; used by strategies to filter near-expiry markets
     UNIQUE(market_id, ts)
 );
 ```
