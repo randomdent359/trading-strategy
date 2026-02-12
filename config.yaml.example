@@ -68,3 +68,10 @@ paper:
   # Kelly criterion (off by default — enable to reduce size on low-confidence signals)
   kelly_enabled: true
   kelly_safety_factor: 0.5
+  # Slippage and fees
+  slippage_pct:
+    hyperliquid: 0.0005   # 0.05% slippage
+    polymarket: 0.005     # 0.5% slippage (less liquid)
+  fee_pct:
+    hyperliquid: 0.0005   # 0.05% taker fee
+    polymarket: 0.002     # 0.2% average fee

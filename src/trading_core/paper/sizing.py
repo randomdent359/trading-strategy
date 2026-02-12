@@ -120,3 +120,49 @@ def calculate_adjusted_risk_pct(
         safety_factor=config.kelly_safety_factor,
     )
     return min(kelly, config.risk_pct)
+
+
+def apply_slippage(
+    price: Decimal,
+    direction: str,
+    slippage_pct: float,
+    is_entry: bool,
+) -> Decimal:
+    """Apply slippage to a price based on direction and entry/exit.
+
+    For entries:
+    - LONG: pay more (price * (1 + slippage))
+    - SHORT: receive less (price * (1 - slippage))
+
+    For exits:
+    - LONG: receive less (price * (1 - slippage))
+    - SHORT: pay more (price * (1 + slippage))
+    """
+    slippage = Decimal(str(slippage_pct))
+
+    if is_entry:
+        if direction == "LONG":
+            return price * (1 + slippage)
+        else:  # SHORT
+            return price * (1 - slippage)
+    else:  # exit
+        if direction == "LONG":
+            return price * (1 - slippage)
+        else:  # SHORT
+            return price * (1 + slippage)
+
+
+def calculate_fees(
+    entry_price: Decimal,
+    exit_price: Decimal,
+    quantity: Decimal,
+    fee_pct: float,
+) -> Decimal:
+    """Calculate total fees for a round-trip trade.
+
+    Fees are charged on notional value at both entry and exit.
+    """
+    fee_rate = Decimal(str(fee_pct))
+    entry_notional = entry_price * quantity
+    exit_notional = exit_price * quantity
+    return (entry_notional + exit_notional) * fee_rate

@@ -14,7 +14,9 @@ from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.pricing import get_latest_price
 from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
 from trading_core.paper.sizing import (
+    apply_slippage,
     calculate_adjusted_risk_pct,
+    calculate_fees,
     calculate_pnl,
     calculate_position_size,
     calculate_stop_price,
@@ -127,11 +129,15 @@ class PaperEngine:
             log.warning("no_price_for_position", asset=signal.asset)
             return None
 
+        # Apply slippage to entry price
+        slippage_pct = self.config.slippage_pct.get(signal.exchange, 0.0)
+        actual_entry_price = apply_slippage(price, signal.direction, slippage_pct, is_entry=True)
+
         risk_pct = calculate_adjusted_risk_pct(
             getattr(signal, "confidence", None), self.config,
         )
         quantity = calculate_position_size(
-            entry_price=price,
+            entry_price=actual_entry_price,
             equity=current_equity,
             risk_pct=risk_pct,
             stop_loss_pct=self.config.default_stop_loss_pct,
@@ -147,12 +153,15 @@ class PaperEngine:
             asset=signal.asset,
             exchange=signal.exchange,
             direction=signal.direction,
-            entry_price=float(price),
+            entry_price=float(actual_entry_price),
             entry_ts=now,
             quantity=float(quantity),
             status="OPEN",
             signal_id=signal.id,
-            metadata_={},
+            metadata_={
+                "raw_price": float(price),
+                "slippage_pct": slippage_pct,
+            },
         )
         session.add(position)
         session.commit()
@@ -164,7 +173,9 @@ class PaperEngine:
             strategy=signal.strategy,
             asset=signal.asset,
             direction=signal.direction,
-            entry_price=float(price),
+            entry_price=float(actual_entry_price),
+            raw_price=float(price),
+            slippage_pct=slippage_pct,
             quantity=float(quantity),
         )
         return position
@@ -221,19 +232,39 @@ class PaperEngine:
         exit_reason: str,
     ) -> None:
         """Close a position: calculate P&L, update row fields."""
+        # Apply slippage to exit price
+        slippage_pct = self.config.slippage_pct.get(position.exchange, 0.0)
+        actual_exit_price = apply_slippage(exit_price, position.direction, slippage_pct, is_entry=False)
+
         entry = Decimal(str(position.entry_price))
         qty = Decimal(str(position.quantity))
-        pnl = calculate_pnl(position.direction, entry, exit_price, qty)
+
+        # Calculate gross P&L
+        gross_pnl = calculate_pnl(position.direction, entry, actual_exit_price, qty)
+
+        # Calculate and deduct fees
+        fee_pct = self.config.fee_pct.get(position.exchange, 0.0)
+        fees = calculate_fees(entry, actual_exit_price, qty, fee_pct)
+        net_pnl = gross_pnl - fees
 
         now = datetime.now(timezone.utc)
-        position.exit_price = float(exit_price)
+        position.exit_price = float(actual_exit_price)
         position.exit_ts = now
         position.exit_reason = exit_reason
-        position.realised_pnl = float(pnl)
+        position.realised_pnl = float(net_pnl)
         position.status = "CLOSED"
+
+        # Store fee info in metadata
+        if position.metadata_ is None:
+            position.metadata_ = {}
+        position.metadata_["exit_raw_price"] = float(exit_price)
+        position.metadata_["exit_slippage_pct"] = slippage_pct
+        position.metadata_["fees"] = float(fees)
+        position.metadata_["gross_pnl"] = float(gross_pnl)
+
         session.commit()
 
-        self.risk_tracker.record_close(position.strategy, float(pnl), now)
+        self.risk_tracker.record_close(position.strategy, float(net_pnl), now)
 
         log.info(
             "position_closed",
@@ -242,7 +273,11 @@ class PaperEngine:
             asset=position.asset,
             direction=position.direction,
             exit_reason=exit_reason,
-            realised_pnl=float(pnl),
+            gross_pnl=float(gross_pnl),
+            fees=float(fees),
+            net_pnl=float(net_pnl),
+            exit_raw_price=float(exit_price),
+            exit_slippage_pct=slippage_pct,
         )
 
     # ── Equity ────────────────────────────────────────────────
@@ -279,12 +314,26 @@ class PaperEngine:
         for pos in open_positions:
             price = get_latest_price(session, pos.asset, pos.exchange)
             if price is not None:
-                unrealised += calculate_pnl(
+                # Apply slippage to exit price for unrealized P&L calculation
+                slippage_pct = self.config.slippage_pct.get(pos.exchange, 0.0)
+                exit_price = apply_slippage(price, pos.direction, slippage_pct, is_entry=False)
+
+                # Calculate gross P&L
+                gross_pnl = calculate_pnl(
                     pos.direction,
                     Decimal(str(pos.entry_price)),
-                    price,
+                    exit_price,
                     Decimal(str(pos.quantity)),
                 )
+
+                # Estimate fees (entry fee already paid, exit fee pending)
+                fee_pct = self.config.fee_pct.get(pos.exchange, 0.0)
+                entry_fee = Decimal(str(pos.entry_price)) * Decimal(str(pos.quantity)) * Decimal(str(fee_pct))
+                exit_fee = exit_price * Decimal(str(pos.quantity)) * Decimal(str(fee_pct))
+                total_fees = entry_fee + exit_fee
+
+                # Net unrealized P&L
+                unrealised += gross_pnl - total_fees
 
         return initial + realised + unrealised
 
@@ -322,12 +371,26 @@ class PaperEngine:
         for pos in open_positions:
             price = get_latest_price(session, pos.asset, pos.exchange)
             if price is not None:
-                pos_pnl = calculate_pnl(
+                # Apply slippage to exit price for unrealized P&L calculation
+                slippage_pct = self.config.slippage_pct.get(pos.exchange, 0.0)
+                exit_price = apply_slippage(price, pos.direction, slippage_pct, is_entry=False)
+
+                # Calculate gross P&L
+                gross_pnl = calculate_pnl(
                     pos.direction,
                     Decimal(str(pos.entry_price)),
-                    price,
+                    exit_price,
                     Decimal(str(pos.quantity)),
                 )
+
+                # Estimate fees
+                fee_pct = self.config.fee_pct.get(pos.exchange, 0.0)
+                entry_fee = Decimal(str(pos.entry_price)) * Decimal(str(pos.quantity)) * Decimal(str(fee_pct))
+                exit_fee = exit_price * Decimal(str(pos.quantity)) * Decimal(str(fee_pct))
+                total_fees = entry_fee + exit_fee
+
+                # Net unrealized P&L
+                pos_pnl = gross_pnl - total_fees
                 unrealised += pos_pnl
             else:
                 pos_pnl = Decimal("0")

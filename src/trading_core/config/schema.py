@@ -38,6 +38,15 @@ class PaperConfig(BaseModel):
     # Kelly criterion
     kelly_enabled: bool = True
     kelly_safety_factor: float = 0.5
+    # Slippage and fees
+    slippage_pct: dict[str, float] = Field(default_factory=lambda: {
+        "hyperliquid": 0.0005,  # 0.05%
+        "polymarket": 0.005,    # 0.5%
+    })
+    fee_pct: dict[str, float] = Field(default_factory=lambda: {
+        "hyperliquid": 0.0005,  # 0.05% taker fee
+        "polymarket": 0.002,    # 0.2% average fee
+    })
 
 
 class AppConfig(BaseModel):
