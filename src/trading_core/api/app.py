@@ -15,6 +15,8 @@ from trading_core.db.tables.paper import PositionRow, MarkToMarketRow, Portfolio
 from trading_core.db.tables.market_data import CandleRow
 from trading_core.config.loader import load_config
 from trading_core.metrics import MetricsCache, compute_strategy_metrics, compute_portfolio_metrics
+import trading_core.strategy.strategies  # noqa: F401 — trigger @register decorators
+from trading_core.strategy import STRATEGY_REGISTRY
 
 logger = structlog.get_logger()
 
@@ -69,11 +71,15 @@ async def health_check():
 
 @app.get("/api/strategies")
 async def list_strategies(session: Session = Depends(get_db)):
-    """List all strategies with current performance metrics."""
+    """List all registered strategies with current performance metrics."""
     strategies = []
-    strategy_names = session.execute(
+
+    # Start from registry so every strategy is surfaced, even those with no trades yet.
+    # Union with DB names to catch any legacy strategies that ran but aren't registered.
+    db_names = set(session.execute(
         select(distinct(PositionRow.strategy))
-    ).scalars().all()
+    ).scalars().all())
+    strategy_names = sorted(set(STRATEGY_REGISTRY) | db_names)
 
     for strategy_name in strategy_names:
         cache_key = f"strategy:{strategy_name}"
@@ -87,9 +93,16 @@ async def list_strategies(session: Session = Depends(get_db)):
         strategy_config = config.strategies.get(strategy_name, {})
         enabled = strategy_config.get("enabled", False)
 
+        cls = STRATEGY_REGISTRY.get(strategy_name)
+
         entry = {
             "name": strategy_name,
             "enabled": enabled,
+            "description": (cls.__doc__ or "").strip() if cls else "",
+            "docs": cls.docs if cls else {},
+            "assets": cls.assets if cls else [],
+            "exchanges": cls.exchanges if cls else [],
+            "interval": cls.interval if cls else "",
             "totalTrades": m.total_trades,
             "winRate": round(m.win_rate, 2),
             "avgWin": round(m.avg_win, 4),
@@ -208,6 +221,23 @@ async def get_strategy_trades(
         "total": total_count,
         "limit": limit,
         "offset": offset
+    }
+
+
+@app.get("/api/strategies/{strategy_name}/docs")
+async def get_strategy_docs(strategy_name: str):
+    """Get structured documentation for a strategy."""
+    if strategy_name not in STRATEGY_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Strategy {strategy_name!r} not found")
+
+    cls = STRATEGY_REGISTRY[strategy_name]
+    return {
+        "name": cls.name,
+        "description": (cls.__doc__ or "").strip(),
+        "docs": cls.docs,
+        "assets": cls.assets,
+        "exchanges": cls.exchanges,
+        "interval": cls.interval,
     }
 
 

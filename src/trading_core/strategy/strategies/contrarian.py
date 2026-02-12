@@ -53,6 +53,11 @@ class ContrarianPure(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["polymarket"]
     interval = "10m"
+    docs = {
+        "thesis": "Bet against consensus when prediction market probability exceeds a threshold. Extreme yes/no prices tend to revert as they overweight recent sentiment.",
+        "data": "Polymarket yes_price for each market in the snapshot. Filters out markets closing within min_days_to_close.",
+        "risk": "Prediction markets can stay extreme longer than expected. Illiquid markets may have wide spreads. Contrarian bets lose when consensus is correct.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)
@@ -108,6 +113,11 @@ class ContrarianStrength(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["polymarket"]
     interval = "10m"
+    docs = {
+        "thesis": "Higher-conviction contrarian — only fires when consensus exceeds 80%. Trades less often but targets stronger mean-reversion setups.",
+        "data": "Polymarket yes_price with a stricter threshold (default 0.80 vs 0.72). Same market filtering as ContrarianPure.",
+        "risk": "Fewer signals means less diversification. Very strong consensus sometimes reflects genuine information rather than crowd bias.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)

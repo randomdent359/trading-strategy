@@ -19,6 +19,7 @@ class Strategy(ABC):
     assets: list[str]
     exchanges: list[str]
     interval: str  # e.g. "1m", "5m", "1h"
+    docs: dict[str, str] = {}
 
     def __init__(self, **params: Any) -> None:
         self.params = params

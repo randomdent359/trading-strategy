@@ -22,6 +22,11 @@ class RSIMeanReversion(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["hyperliquid"]
     interval = "5m"
+    docs = {
+        "thesis": "Fade overbought/oversold RSI readings on Hyperliquid perps. Extreme RSI values tend to revert to the mean as momentum exhausts.",
+        "data": "Hyperliquid 5m candle close prices fed into a 14-period RSI. Overbought default 75, oversold default 25.",
+        "risk": "RSI can stay overbought/oversold in strong trends, leading to early entries against the trend. Works best in ranging or choppy markets.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)

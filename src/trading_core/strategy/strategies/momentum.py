@@ -22,6 +22,11 @@ class MomentumBreakout(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["hyperliquid"]
     interval = "5m"
+    docs = {
+        "thesis": "Enter on Bollinger Band breakouts confirmed by a volume spike. Price closing outside the bands with elevated volume signals genuine momentum rather than noise.",
+        "data": "Hyperliquid 5m candles — close prices for Bollinger Bands (default 20-period, 2 std) and volume for the multiplier filter (default 1.5x average).",
+        "risk": "False breakouts are common; volume confirmation reduces but does not eliminate them. Ranging markets generate whipsaws. Wider bands reduce signals but increase reliability.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)

@@ -21,6 +21,11 @@ class FundingRate(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["hyperliquid"]
     interval = "1m"
+    docs = {
+        "thesis": "Fade extreme funding rates on perpetual futures. When longs pay high funding, they are over-leveraged and price tends to correct downward (and vice versa).",
+        "data": "Hyperliquid funding rate from the latest funding snapshot. Compares absolute rate against a configurable threshold (default 0.12%).",
+        "risk": "Funding can stay elevated during strong trends. Position may be stopped out before the mean-reversion plays out.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)
@@ -72,6 +77,11 @@ class FundingOI(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["hyperliquid"]
     interval = "1m"
+    docs = {
+        "thesis": "Extreme funding combined with high open interest signals maximum squeeze potential. Both conditions must be met, filtering for setups where crowded positioning is most likely to unwind.",
+        "data": "Hyperliquid funding rate and open interest. OI is compared to the 7-day historical max from the snapshot window. Both must exceed their thresholds.",
+        "risk": "Dual-filter reduces signal frequency. High OI with extreme funding can persist during parabolic moves. Squeeze timing is uncertain.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)

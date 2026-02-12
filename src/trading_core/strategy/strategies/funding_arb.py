@@ -24,6 +24,11 @@ class FundingArb(Strategy):
     assets = ["BTC", "ETH", "SOL"]
     exchanges = ["hyperliquid"]
     interval = "1m"
+    docs = {
+        "thesis": "Collect funding payments by positioning against the dominant side at a lower threshold than FundingRate. Captures more frequent, smaller arbitrage opportunities.",
+        "data": "Hyperliquid funding rate from the latest funding snapshot. Uses a lower threshold (default 0.05%) to trigger more often than FundingRate.",
+        "risk": "Lower threshold means more trades with smaller edge per trade. Adverse price moves can outweigh funding collected. Higher turnover increases fee drag.",
+    }
 
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)
