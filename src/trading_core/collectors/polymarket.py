@@ -101,6 +101,7 @@ async def poll_markets(
             log.info("polymarket poll complete", markets_found=len(rows), total_fetched=len(market_data))
 
         except Exception:
+            session.rollback()
             log.exception("polymarket poll failed")
 
         await asyncio.sleep(interval_s)

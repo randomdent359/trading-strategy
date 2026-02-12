@@ -96,6 +96,7 @@ async def backfill_candles(
                 count += 1
             log.info("backfill complete", asset=asset, candles=count)
         except Exception:
+            session.rollback()
             log.exception("backfill failed", asset=asset)
 
 
@@ -121,6 +122,7 @@ async def candle_listener(
                 )
 
         except Exception:
+            session.rollback()
             log.exception("candle WebSocket disconnected, reconnecting in 5s")
             await asyncio.sleep(5)
 
@@ -159,6 +161,7 @@ async def funding_poller(
                 )
 
         except Exception:
+            session.rollback()
             log.exception("funding poll failed")
 
         await asyncio.sleep(interval_s)
