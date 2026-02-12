@@ -257,11 +257,11 @@ A single process that:
 
 ---
 
-## Stage 3 — Paper Trading Engine ✅ COMPLETE (except 3.4)
+## Stage 3 — Paper Trading Engine ✅ COMPLETE
 
 **Goal:** Consume signals and manage a realistic paper portfolio in Postgres with proper position tracking.
 
-**Status:** Core engine, risk controls, and Kelly sizing all implemented and live. Only slippage/fee simulation (3.4) remains. Hyperliquid positions only — Polymarket signals remain informational until a price oracle service is built (see Future Work).
+**Status:** Complete. Core engine, risk controls, Kelly sizing, and slippage/fee simulation all implemented and live. Hyperliquid positions only — Polymarket signals remain informational until a price oracle service is built (see Future Work).
 
 **Price source (stopgap):** Latest candle close from `trading_market_data.candles` (not live API). Approximately ~5s stale from the collector write cycle. This is acceptable for paper trading with 5s tick intervals. A dedicated price oracle service should replace this when real-time pricing becomes critical (e.g., live trading or sub-second exit triggers).
 
@@ -353,9 +353,18 @@ kelly_safety_factor: 0.5
 
 36 tests in `tests/test_risk.py` covering Kelly math, risk checks, tracker state machine, and engine integration.
 
-### 3.4 Slippage and fee simulation
+### 3.4 Slippage and fee simulation ✅ COMPLETE
 - Apply configurable slippage to entry and exit prices (default 0.05% for Hyperliquid, 0.5% for Polymarket)
 - Deduct trading fees from P&L (Hyperliquid: ~0.02% maker / 0.05% taker; Polymarket: variable)
+
+**Implemented:**
+- `apply_slippage()` function adjusts prices based on direction and entry/exit
+- `calculate_fees()` function computes round-trip trading fees
+- Entry prices include slippage (LONG pays more, SHORT receives less)
+- Exit prices include slippage (LONG receives less, SHORT pays more)
+- Fees deducted from realized P&L on position close
+- Unrealized P&L calculations include estimated exit slippage and fees
+- Configurable per exchange via `slippage_pct` and `fee_pct` in config
 
 **Deliverables:** Paper engine process, positions flowing through full lifecycle with real-price P&L, mark-to-market snapshots populating every minute.
 
@@ -491,7 +500,7 @@ This should be tracked as a separate issue and is a prerequisite for Polymarket 
 | **0** | Foundations (package, Postgres, config, logging) | — | ✅ Complete |
 | **1** | Market data ingestion | Stage 0 | ✅ Complete |
 | **2** | Strategy framework + signal generation | Stage 0, 1 | ✅ Complete |
-| **3** | Paper trading engine | Stage 1, 2 | ✅ Complete (3.4 slippage/fees remaining) |
+| **3** | Paper trading engine | Stage 1, 2 | ✅ Complete |
 | **4** | Dashboard visualisation | Stage 3 | TODO |
 | **5** | Plugin system and DX | Stage 2, 3 | TODO |
 
