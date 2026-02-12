@@ -25,13 +25,26 @@ from trading_core.logging import get_logger, setup_logging
 log = get_logger(__name__)
 
 
+def _parse_end_date(raw: str | None) -> datetime | None:
+    """Parse an ISO 8601 endDate string from the Polymarket API.
+
+    Returns None for missing or malformed values rather than crashing.
+    """
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
 def _upsert_market(session: Session, row: dict) -> None:
     """Insert a polymarket market snapshot, ignoring duplicates."""
     session.execute(
         text("""
             INSERT INTO trading_market_data.polymarket_markets
-                (market_id, market_title, asset, ts, yes_price, no_price, volume_24h, liquidity)
-            VALUES (:market_id, :market_title, :asset, :ts, :yes_price, :no_price, :volume_24h, :liquidity)
+                (market_id, market_title, asset, ts, yes_price, no_price, volume_24h, liquidity, end_date)
+            VALUES (:market_id, :market_title, :asset, :ts, :yes_price, :no_price, :volume_24h, :liquidity, :end_date)
             ON CONFLICT (market_id, ts) DO NOTHING
         """),
         row,
@@ -77,6 +90,7 @@ def _extract_markets(market_data: list[dict], assets: list[str]) -> list[dict]:
             "no_price": no_price,
             "volume_24h": market.get("volume24hr") or market.get("volume"),
             "liquidity": market.get("liquidity"),
+            "end_date": _parse_end_date(market.get("endDate")),
         })
 
     return rows

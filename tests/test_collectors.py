@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from trading_core.collectors.hyperliquid import _ms_to_dt
-from trading_core.collectors.polymarket import _extract_markets
+from trading_core.collectors.polymarket import _extract_markets, _parse_end_date
 
 
 class TestHyperliquidHelpers:
@@ -132,3 +132,65 @@ class TestPolymarketExtraction:
         markets = ["bad_string", {"conditionId": "0x1", "question": "BTC up?", "outcomePrices": [0.6, 0.4]}]
         rows = _extract_markets(markets, ["BTC"])
         assert len(rows) == 1
+
+    def test_extracts_end_date(self):
+        markets = [
+            {
+                "conditionId": "0xabc",
+                "question": "Will BTC hit 100k by March?",
+                "outcomePrices": [0.72, 0.28],
+                "endDate": "2026-03-31T23:59:59Z",
+            }
+        ]
+        rows = _extract_markets(markets, ["BTC"])
+        assert len(rows) == 1
+        assert rows[0]["end_date"] is not None
+        assert rows[0]["end_date"].year == 2026
+        assert rows[0]["end_date"].month == 3
+
+    def test_handles_missing_end_date(self):
+        markets = [
+            {
+                "conditionId": "0xdef",
+                "question": "ETH above 5k?",
+                "outcomePrices": [0.6, 0.4],
+            }
+        ]
+        rows = _extract_markets(markets, ["ETH"])
+        assert len(rows) == 1
+        assert rows[0]["end_date"] is None
+
+    def test_handles_malformed_end_date(self):
+        markets = [
+            {
+                "conditionId": "0x999",
+                "question": "SOL above 200?",
+                "outcomePrices": [0.5, 0.5],
+                "endDate": "not-a-date",
+            }
+        ]
+        rows = _extract_markets(markets, ["SOL"])
+        assert len(rows) == 1
+        assert rows[0]["end_date"] is None
+
+
+class TestParseEndDate:
+    def test_valid_iso_with_z(self):
+        dt = _parse_end_date("2026-03-15T12:00:00Z")
+        assert dt is not None
+        assert dt.year == 2026
+        assert dt.month == 3
+        assert dt.day == 15
+
+    def test_valid_iso_with_offset(self):
+        dt = _parse_end_date("2026-06-01T00:00:00+00:00")
+        assert dt is not None
+
+    def test_none_input(self):
+        assert _parse_end_date(None) is None
+
+    def test_empty_string(self):
+        assert _parse_end_date("") is None
+
+    def test_malformed(self):
+        assert _parse_end_date("garbage") is None
