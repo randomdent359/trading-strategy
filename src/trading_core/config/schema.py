@@ -30,6 +30,14 @@ class PaperConfig(BaseModel):
     default_stop_loss_pct: float = 0.02
     default_take_profit_pct: float = 0.04
     default_timeout_minutes: int = 60
+    # Risk controls
+    max_positions_per_strategy: int = 3
+    max_total_exposure_pct: float = 0.50
+    max_daily_loss_per_strategy: float = 500.0
+    cooldown_after_loss_minutes: int = 5
+    # Kelly criterion
+    kelly_enabled: bool = True
+    kelly_safety_factor: float = 0.5
 
 
 class AppConfig(BaseModel):

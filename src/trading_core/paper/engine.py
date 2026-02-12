@@ -12,7 +12,9 @@ from trading_core.config.schema import PaperConfig
 from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.pricing import get_latest_price
+from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
 from trading_core.paper.sizing import (
+    calculate_adjusted_risk_pct,
     calculate_pnl,
     calculate_position_size,
     calculate_stop_price,
@@ -28,6 +30,7 @@ class PaperEngine:
     def __init__(self, config: PaperConfig, portfolio_id: int) -> None:
         self.config = config
         self.portfolio_id = portfolio_id
+        self.risk_tracker = RiskTracker(config)
 
     # ── Portfolio ──────────────────────────────────────────────
 
@@ -68,6 +71,48 @@ class PaperEngine:
             log.info("signals_consumed", count=len(rows))
         return rows
 
+    # ── Risk gate ───────────────────────────────────────────────
+
+    def check_risk(
+        self,
+        session: Session,
+        signal: SignalRow,
+        equity: Decimal,
+        now: datetime,
+    ) -> RiskVerdict:
+        """Evaluate all risk controls for a prospective signal."""
+        open_positions = (
+            session.query(PositionRow)
+            .filter(
+                PositionRow.portfolio_id == self.portfolio_id,
+                PositionRow.status == "OPEN",
+            )
+            .all()
+        )
+
+        # Estimate new position notional value for exposure check
+        price = get_latest_price(session, signal.asset, signal.exchange)
+        if price is None:
+            new_value = Decimal("0")
+        else:
+            risk_pct = calculate_adjusted_risk_pct(
+                getattr(signal, "confidence", None), self.config,
+            )
+            qty = calculate_position_size(
+                price, equity, risk_pct, self.config.default_stop_loss_pct,
+            )
+            new_value = price * qty
+
+        return evaluate_risk(
+            config=self.config,
+            tracker=self.risk_tracker,
+            strategy=signal.strategy,
+            open_positions=open_positions,
+            equity=equity,
+            new_position_value=new_value,
+            now=now,
+        )
+
     # ── Position lifecycle ────────────────────────────────────
 
     def open_position(
@@ -82,12 +127,18 @@ class PaperEngine:
             log.warning("no_price_for_position", asset=signal.asset)
             return None
 
+        risk_pct = calculate_adjusted_risk_pct(
+            getattr(signal, "confidence", None), self.config,
+        )
         quantity = calculate_position_size(
             entry_price=price,
             equity=current_equity,
-            risk_pct=self.config.risk_pct,
+            risk_pct=risk_pct,
             stop_loss_pct=self.config.default_stop_loss_pct,
         )
+        if quantity == 0:
+            log.info("zero_quantity_skipped", asset=signal.asset, strategy=signal.strategy)
+            return None
 
         now = datetime.now(timezone.utc)
         position = PositionRow(
@@ -181,6 +232,8 @@ class PaperEngine:
         position.realised_pnl = float(pnl)
         position.status = "CLOSED"
         session.commit()
+
+        self.risk_tracker.record_close(position.strategy, float(pnl), now)
 
         log.info(
             "position_closed",

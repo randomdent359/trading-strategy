@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from trading_core.config.schema import PaperConfig
+
 
 def calculate_position_size(
     entry_price: Decimal,
@@ -73,3 +75,48 @@ def calculate_take_profit_price(
         return entry_price * (1 + pct)
     else:
         return entry_price * (1 - pct)
+
+
+def calculate_kelly_fraction(
+    confidence: float,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+    safety_factor: float = 0.5,
+) -> float:
+    """Calculate Kelly fraction for position sizing.
+
+    b = take_profit_pct / stop_loss_pct  (reward-to-risk ratio)
+    kelly = (p * b - (1-p)) / b          where p = confidence
+    adjusted = kelly * safety_factor      (half-Kelly by default)
+
+    Returns 0.0 if stop_loss_pct is zero or the edge is non-positive.
+    """
+    if stop_loss_pct == 0:
+        return 0.0
+    b = take_profit_pct / stop_loss_pct
+    if b == 0:
+        return 0.0
+    kelly = (confidence * b - (1 - confidence)) / b
+    if kelly <= 0:
+        return 0.0
+    return kelly * safety_factor
+
+
+def calculate_adjusted_risk_pct(
+    confidence: float | None,
+    config: PaperConfig,
+) -> float:
+    """Return risk_pct, optionally adjusted by Kelly criterion.
+
+    If Kelly is disabled or confidence is None, returns config.risk_pct unchanged.
+    Otherwise, returns min(kelly_fraction, config.risk_pct).
+    """
+    if not config.kelly_enabled or confidence is None:
+        return config.risk_pct
+    kelly = calculate_kelly_fraction(
+        confidence=float(confidence),
+        stop_loss_pct=config.default_stop_loss_pct,
+        take_profit_pct=config.default_take_profit_pct,
+        safety_factor=config.kelly_safety_factor,
+    )
+    return min(kelly, config.risk_pct)

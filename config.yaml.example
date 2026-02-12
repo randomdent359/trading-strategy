@@ -60,3 +60,11 @@ paper:
   default_stop_loss_pct: 0.02
   default_take_profit_pct: 0.04
   default_timeout_minutes: 60
+  # Risk controls
+  max_positions_per_strategy: 3
+  max_total_exposure_pct: 0.50
+  max_daily_loss_per_strategy: 500.0   # 5% of default $10k
+  cooldown_after_loss_minutes: 5
+  # Kelly criterion (off by default — enable to reduce size on low-confidence signals)
+  kelly_enabled: true
+  kelly_safety_factor: 0.5

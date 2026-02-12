@@ -55,7 +55,16 @@ async def run_loop(config: AppConfig) -> None:
                 signals = engine.consume_signals(session)
                 for signal in signals:
                     equity = engine.get_current_equity(session)
-                    engine.open_position(session, signal, equity)
+                    verdict = engine.check_risk(session, signal, equity, now)
+                    if verdict.allowed:
+                        engine.open_position(session, signal, equity)
+                    else:
+                        log.info(
+                            "signal_rejected",
+                            strategy=signal.strategy,
+                            asset=signal.asset,
+                            reason=verdict.reason,
+                        )
 
                 # Check exit conditions on open positions
                 engine.check_exits(session, now)
