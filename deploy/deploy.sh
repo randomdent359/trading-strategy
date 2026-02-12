@@ -38,7 +38,7 @@ echo "Config deployed"
 # Install/upgrade the package
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
 cd ~/trading/repo
-pip install --user --quiet --force-reinstall --no-deps . 2>&1 | tail -3
+pip install --user --force-reinstall --no-deps . 2>&1
 echo "trading-core package installed"
 EOFSH
 
