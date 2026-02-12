@@ -13,7 +13,11 @@ ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
 echo "Stopping services..."
 echo ""
 
-# Stop in reverse order (trader first, then monitors)
+# Stop in reverse order (engines/traders first, then monitors)
+echo "⏹ Stopping paper-engine..."
+sudo systemctl stop paper-engine
+sleep 1
+
 echo "⏹ Stopping paper-trader..."
 sudo systemctl stop paper-trader
 sleep 1
@@ -41,7 +45,8 @@ sudo systemctl status --no-pager contrarian-monitor \
   polymarket-strength-filtered \
   hyperliquid-funding \
   hyperliquid-funding-oi \
-  paper-trader 2>/dev/null || true
+  paper-trader \
+  paper-engine 2>/dev/null || true
 
 EOFSH
 

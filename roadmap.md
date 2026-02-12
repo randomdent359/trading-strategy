@@ -255,6 +255,10 @@ A single process that:
 
 **Goal:** Consume signals and manage a realistic paper portfolio in Postgres with proper position tracking.
 
+**Status:** Implemented. Hyperliquid positions only. Polymarket signals remain informational — a price oracle service is needed before PM positions are viable (see Future Work below).
+
+**Price source (stopgap):** Latest candle close from `trading_market_data.candles` (not live API). Approximately ~5s stale from the collector write cycle. This is acceptable for paper trading with 5s tick intervals. A dedicated price oracle service should replace this when real-time pricing becomes critical (e.g., live trading or sub-second exit triggers).
+
 ### 3.1 Core schema
 
 ```sql
@@ -435,6 +439,19 @@ python -m trading_core optimise --strategy FundingRate \
 Each strategy class should have a docstring explaining the thesis, the expected edge, the data requirements, and the risk characteristics. The dashboard should render this on the strategy detail page.
 
 **Deliverables:** Template generator, backtest harness, optional hot-reload, strategy docs rendered in dashboard.
+
+---
+
+## Future Work
+
+### Price Oracle Service
+A near-realtime price feed service that provides authoritative prices mapped to specific sources. This would:
+- Replace the current stopgap of reading latest candle close from DB (~5s stale)
+- Enable Polymarket position management (currently blocked — PM signals are informational only)
+- Support sub-second exit triggers for live trading scenarios
+- Provide a unified price API for both the paper engine and future live engine
+
+This should be tracked as a separate issue and is a prerequisite for Polymarket paper positions.
 
 ---
 

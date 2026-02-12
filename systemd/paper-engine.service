@@ -1,0 +1,25 @@
+[Unit]
+Description=Paper Trading Engine (signals → positions → P&L)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rdent
+Group=rdent
+WorkingDirectory=/home/rdent/trading
+
+ExecStart=/usr/bin/python3 -m trading_core.paper --config /home/rdent/trading/config.yaml
+
+Restart=on-failure
+RestartSec=10
+
+Environment="PATH=/usr/local/bin:/usr/bin"
+Environment="TRADING_DATABASE_URL=postgresql://rdent@10.6.0.146:5432/rdent?sslmode=verify-full&sslrootcert=/etc/pki/ca-trust/source/anchors/ca.internal-rsa.pem&sslcert=/etc/pki/tls/misc/anjie.kosherinata.internal-rsa.pem&sslkey=/etc/pki/tls/private/anjie.kosherinata.internal-rsa.pem"
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

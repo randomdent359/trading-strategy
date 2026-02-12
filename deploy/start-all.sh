@@ -38,6 +38,11 @@ echo "▶ Starting paper-trader..."
 sudo systemctl start paper-trader
 sleep 1
 
+# Start Paper Engine (Stage 3)
+echo "▶ Starting paper-engine..."
+sudo systemctl start paper-engine
+sleep 1
+
 echo ""
 echo "✅ All services started"
 echo ""
@@ -46,7 +51,8 @@ sudo systemctl status --no-pager contrarian-monitor \
   polymarket-strength-filtered \
   hyperliquid-funding \
   hyperliquid-funding-oi \
-  paper-trader 2>/dev/null || true
+  paper-trader \
+  paper-engine 2>/dev/null || true
 
 echo ""
 echo "Tip: Watch logs with:"

@@ -17,6 +17,7 @@ sudo systemctl status --no-pager polymarket-strength-filtered 2>/dev/null | grep
 sudo systemctl status --no-pager hyperliquid-funding 2>/dev/null | grep -E "(Active|Loaded)" || echo "hyperliquid-funding: NOT FOUND"
 sudo systemctl status --no-pager hyperliquid-funding-oi 2>/dev/null | grep -E "(Active|Loaded)" || echo "hyperliquid-funding-oi: NOT FOUND"
 sudo systemctl status --no-pager paper-trader 2>/dev/null | grep -E "(Active|Loaded)" || echo "paper-trader: NOT FOUND"
+sudo systemctl status --no-pager paper-engine 2>/dev/null | grep -E "(Active|Loaded)" || echo "paper-engine: NOT FOUND"
 
 echo ""
 echo "Log Files:"
