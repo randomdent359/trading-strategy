@@ -93,6 +93,59 @@ class TestContrarianPure:
         assert sig is not None
         assert sig.direction == "SHORT"
 
+    def test_scans_all_markets_picks_strongest(self):
+        """Strategy should find the strongest extreme across all markets."""
+        s = ContrarianPure(threshold=0.72)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="neutral", market_title="Neutral", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.50"),
+                ),
+                PolymarketMarket(
+                    market_id="mild", market_title="Mild extreme", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.80"),
+                ),
+                PolymarketMarket(
+                    market_id="strong", market_title="Strongest extreme", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.95"),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+        assert sig.direction == "SHORT"
+        assert sig.metadata["market_id"] == "strong"
+        assert sig.confidence > 0.8  # strongest extreme
+
+    def test_finds_extreme_among_neutrals(self):
+        """Even if most markets are neutral, finds the one extreme."""
+        s = ContrarianPure(threshold=0.72)
+        snap = MarketSnapshot(
+            asset="ETH",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="n1", market_title="Neutral 1", asset="ETH",
+                    ts=NOW, yes_price=Decimal("0.50"),
+                ),
+                PolymarketMarket(
+                    market_id="n2", market_title="Neutral 2", asset="ETH",
+                    ts=NOW, yes_price=Decimal("0.40"),
+                ),
+                PolymarketMarket(
+                    market_id="extreme", market_title="The extreme", asset="ETH",
+                    ts=NOW, yes_price=Decimal("0.05"),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+        assert sig.direction == "LONG"
+        assert sig.metadata["market_id"] == "extreme"
+
 
 # ── Contrarian Strength ─────────────────────────────────────────
 

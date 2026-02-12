@@ -5,13 +5,37 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from trading_core.models import MarketSnapshot, Signal
+from trading_core.models import MarketSnapshot, PolymarketMarket, Signal
 from trading_core.strategy import Strategy, register
+
+
+def _score_market(
+    market: PolymarketMarket,
+    threshold: Decimal,
+) -> tuple[str, float, Decimal] | None:
+    """Score a single market. Returns (direction, confidence, yes_price) or None."""
+    if market.yes_price is None:
+        return None
+
+    yes = market.yes_price
+    if yes > threshold:
+        direction = "SHORT"
+        confidence = float(min((yes - threshold) / (Decimal(1) - threshold), Decimal(1)))
+    elif yes < (Decimal(1) - threshold):
+        direction = "LONG"
+        confidence = float(min(((Decimal(1) - threshold) - yes) / (Decimal(1) - threshold), Decimal(1)))
+    else:
+        return None
+
+    return direction, confidence, yes
 
 
 @register
 class ContrarianPure(Strategy):
     """Bet against consensus when prediction market probability exceeds threshold.
+
+    Scans all Polymarket observations in the snapshot and emits a signal
+    for the market with the strongest extreme.
 
     yes_price > threshold → SHORT (consensus too high, contrarian bets on "no")
     yes_price < (1 - threshold) → LONG (consensus too low, contrarian bets on "yes")
@@ -30,21 +54,20 @@ class ContrarianPure(Strategy):
         if not snapshot.polymarket:
             return None
 
-        # Use the most recent Polymarket observation
-        market = snapshot.polymarket[-1]
-        if market.yes_price is None:
+        best: tuple[str, float, Decimal, PolymarketMarket] | None = None
+
+        for market in snapshot.polymarket:
+            result = _score_market(market, self.threshold)
+            if result is None:
+                continue
+            direction, confidence, yes = result
+            if best is None or confidence > best[1]:
+                best = (direction, confidence, yes, market)
+
+        if best is None:
             return None
 
-        yes = market.yes_price
-        if yes > self.threshold:
-            direction = "SHORT"
-            confidence = float(min((yes - self.threshold) / (Decimal(1) - self.threshold), Decimal(1)))
-        elif yes < (Decimal(1) - self.threshold):
-            direction = "LONG"
-            confidence = float(min(((Decimal(1) - self.threshold) - yes) / (Decimal(1) - self.threshold), Decimal(1)))
-        else:
-            return None
-
+        direction, confidence, yes, market = best
         return Signal(
             strategy=self.name,
             asset=snapshot.asset,
@@ -64,7 +87,11 @@ class ContrarianPure(Strategy):
 
 @register
 class ContrarianStrength(Strategy):
-    """Higher-bar contrarian — only fires on very strong consensus (>80%)."""
+    """Higher-bar contrarian — only fires on very strong consensus (>80%).
+
+    Scans all Polymarket observations in the snapshot and emits a signal
+    for the market with the strongest extreme.
+    """
 
     name = "contrarian_strength"
     assets = ["BTC", "ETH", "SOL"]
@@ -79,20 +106,20 @@ class ContrarianStrength(Strategy):
         if not snapshot.polymarket:
             return None
 
-        market = snapshot.polymarket[-1]
-        if market.yes_price is None:
+        best: tuple[str, float, Decimal, PolymarketMarket] | None = None
+
+        for market in snapshot.polymarket:
+            result = _score_market(market, self.threshold)
+            if result is None:
+                continue
+            direction, confidence, yes = result
+            if best is None or confidence > best[1]:
+                best = (direction, confidence, yes, market)
+
+        if best is None:
             return None
 
-        yes = market.yes_price
-        if yes > self.threshold:
-            direction = "SHORT"
-            confidence = float(min((yes - self.threshold) / (Decimal(1) - self.threshold), Decimal(1)))
-        elif yes < (Decimal(1) - self.threshold):
-            direction = "LONG"
-            confidence = float(min(((Decimal(1) - self.threshold) - yes) / (Decimal(1) - self.threshold), Decimal(1)))
-        else:
-            return None
-
+        direction, confidence, yes, market = best
         return Signal(
             strategy=self.name,
             asset=snapshot.asset,

@@ -27,7 +27,7 @@ def build_snapshot(
     *,
     candle_limit: int = 100,
     funding_days: int = 7,
-    polymarket_limit: int = 10,
+    polymarket_limit: int = 50,
 ) -> MarketSnapshot:
     """Query Postgres and return a MarketSnapshot for a single asset.
 
