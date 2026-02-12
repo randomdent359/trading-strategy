@@ -5,12 +5,14 @@ from trading_core.paper.oracle import PriceEntry, PriceOracle
 from trading_core.paper.pricing import get_latest_price
 from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
 from trading_core.paper.sizing import (
-    calculate_adjusted_risk_pct,
+    calculate_kelly_allocation,
     calculate_kelly_fraction,
     calculate_pnl,
     calculate_position_size,
+    calculate_position_size_kelly,
     calculate_stop_price,
     calculate_take_profit_price,
+    confidence_to_win_prob,
 )
 
 __all__ = [
@@ -21,10 +23,12 @@ __all__ = [
     "RiskVerdict",
     "evaluate_risk",
     "get_latest_price",
-    "calculate_adjusted_risk_pct",
+    "calculate_kelly_allocation",
     "calculate_kelly_fraction",
     "calculate_pnl",
     "calculate_position_size",
+    "calculate_position_size_kelly",
     "calculate_stop_price",
     "calculate_take_profit_price",
+    "confidence_to_win_prob",
 ]

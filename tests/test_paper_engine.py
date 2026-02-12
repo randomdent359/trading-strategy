@@ -32,6 +32,7 @@ DEFAULT_CONFIG = PaperConfig(
     default_stop_loss_pct=0.02,
     default_take_profit_pct=0.04,
     default_timeout_minutes=60,
+    kelly_enabled=False,
 )
 
 

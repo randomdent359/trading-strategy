@@ -19,10 +19,11 @@ from trading_core.paper.pricing import get_latest_price
 from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
 from trading_core.paper.sizing import (
     apply_slippage,
-    calculate_adjusted_risk_pct,
     calculate_fees,
+    calculate_kelly_allocation,
     calculate_pnl,
     calculate_position_size,
+    calculate_position_size_kelly,
     calculate_stop_price,
     calculate_take_profit_price,
 )
@@ -122,12 +123,18 @@ class PaperEngine:
         if price is None:
             new_value = Decimal("0")
         else:
-            risk_pct = calculate_adjusted_risk_pct(
-                getattr(signal, "confidence", None), self.config,
-            )
-            qty = calculate_position_size(
-                price, equity, risk_pct, self.config.default_stop_loss_pct,
-            )
+            confidence = getattr(signal, "confidence", None)
+            kelly_alloc = calculate_kelly_allocation(confidence, self.config)
+            if kelly_alloc > 0:
+                qty = calculate_position_size_kelly(
+                    price, equity, kelly_alloc,
+                    self.config.risk_pct, self.config.default_stop_loss_pct,
+                )
+            else:
+                qty = calculate_position_size(
+                    price, equity, self.config.risk_pct,
+                    self.config.default_stop_loss_pct,
+                )
             new_value = price * qty
 
         return evaluate_risk(
@@ -158,15 +165,23 @@ class PaperEngine:
         slippage_pct = self.config.slippage_pct.get(signal.exchange, 0.0)
         actual_entry_price = apply_slippage(price, signal.direction, slippage_pct, is_entry=True)
 
-        risk_pct = calculate_adjusted_risk_pct(
-            getattr(signal, "confidence", None), self.config,
-        )
-        quantity = calculate_position_size(
-            entry_price=actual_entry_price,
-            equity=current_equity,
-            risk_pct=risk_pct,
-            stop_loss_pct=self.config.default_stop_loss_pct,
-        )
+        confidence = getattr(signal, "confidence", None)
+        kelly_alloc = calculate_kelly_allocation(confidence, self.config)
+        if kelly_alloc > 0:
+            quantity = calculate_position_size_kelly(
+                entry_price=actual_entry_price,
+                equity=current_equity,
+                kelly_allocation=kelly_alloc,
+                risk_pct=self.config.risk_pct,
+                stop_loss_pct=self.config.default_stop_loss_pct,
+            )
+        else:
+            quantity = calculate_position_size(
+                entry_price=actual_entry_price,
+                equity=current_equity,
+                risk_pct=self.config.risk_pct,
+                stop_loss_pct=self.config.default_stop_loss_pct,
+            )
         if quantity == 0:
             log.info("zero_quantity_skipped", asset=signal.asset, strategy=signal.strategy)
             return None

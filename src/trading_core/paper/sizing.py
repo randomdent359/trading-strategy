@@ -102,24 +102,59 @@ def calculate_kelly_fraction(
     return kelly * safety_factor
 
 
-def calculate_adjusted_risk_pct(
+def confidence_to_win_prob(confidence: float, base_rate: float = 0.5) -> float:
+    """Map signal confidence (0–1) to win probability for Kelly.
+
+    p = base_rate + confidence * (1 - base_rate)
+
+    confidence=0 → p=base_rate (neutral edge),
+    confidence=1 → p=1.0 (certainty).
+    """
+    return base_rate + confidence * (1.0 - base_rate)
+
+
+def calculate_kelly_allocation(
     confidence: float | None,
     config: PaperConfig,
 ) -> float:
-    """Return risk_pct, optionally adjusted by Kelly criterion.
+    """Return Kelly allocation fraction (% of equity as position notional).
 
-    If Kelly is disabled or confidence is None, returns config.risk_pct unchanged.
-    Otherwise, returns min(kelly_fraction, config.risk_pct).
+    Maps confidence → win probability, feeds into Kelly formula, returns
+    the fraction of equity to allocate as position notional value.
+    Returns 0.0 if Kelly is disabled, confidence is None, or there is no edge.
     """
     if not config.kelly_enabled or confidence is None:
-        return config.risk_pct
+        return 0.0
+    win_prob = confidence_to_win_prob(
+        float(confidence), config.kelly_base_win_prob,
+    )
     kelly = calculate_kelly_fraction(
-        confidence=float(confidence),
+        confidence=win_prob,
         stop_loss_pct=config.default_stop_loss_pct,
         take_profit_pct=config.default_take_profit_pct,
         safety_factor=config.kelly_safety_factor,
     )
-    return min(kelly, config.risk_pct)
+    return kelly
+
+
+def calculate_position_size_kelly(
+    entry_price: Decimal,
+    equity: Decimal,
+    kelly_allocation: float,
+    risk_pct: float,
+    stop_loss_pct: float,
+) -> Decimal:
+    """Calculate position quantity using Kelly allocation with a risk cap.
+
+    notional = equity * kelly_allocation
+    max_notional = (equity * risk_pct) / stop_loss_pct   (risk cap)
+    quantity = min(notional, max_notional) / entry_price
+    """
+    if entry_price == 0 or kelly_allocation <= 0:
+        return Decimal("0")
+    notional = equity * Decimal(str(kelly_allocation))
+    max_notional = (equity * Decimal(str(risk_pct))) / Decimal(str(stop_loss_pct))
+    return min(notional, max_notional) / entry_price
 
 
 def apply_slippage(

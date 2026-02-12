@@ -68,6 +68,7 @@ paper:
   # Kelly criterion (off by default — enable to reduce size on low-confidence signals)
   kelly_enabled: true
   kelly_safety_factor: 0.5
+  kelly_base_win_prob: 0.5
   # Price oracle (real-time HL WebSocket + PM DB fallback)
   price_oracle_enabled: true
   price_oracle_staleness_s: 30.0        # HL cache expiry

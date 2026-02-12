@@ -24,8 +24,10 @@ from trading_core.paper.risk import (
     evaluate_risk,
 )
 from trading_core.paper.sizing import (
-    calculate_adjusted_risk_pct,
+    calculate_kelly_allocation,
     calculate_kelly_fraction,
+    calculate_position_size_kelly,
+    confidence_to_win_prob,
 )
 
 NOW = datetime(2025, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -182,31 +184,107 @@ class TestKellyFraction:
         assert result == pytest.approx(0.0, abs=1e-10)
 
 
-# ── TestCalculateAdjustedRiskPct ──────────────────────────────
+# ── TestConfidenceToWinProb ────────────────────────────────────
 
 
-class TestCalculateAdjustedRiskPct:
-    def test_kelly_disabled_returns_flat(self):
+class TestConfidenceToWinProb:
+    def test_zero_confidence(self):
+        assert confidence_to_win_prob(0.0, 0.5) == 0.5
+
+    def test_full_confidence(self):
+        assert confidence_to_win_prob(1.0, 0.5) == 1.0
+
+    def test_mid_confidence(self):
+        # 0.5 + 0.5 * 0.5 = 0.75
+        assert confidence_to_win_prob(0.5, 0.5) == 0.75
+
+    def test_linearity(self):
+        # p should scale linearly between base_rate and 1.0
+        p1 = confidence_to_win_prob(0.2, 0.5)
+        p2 = confidence_to_win_prob(0.4, 0.5)
+        p3 = confidence_to_win_prob(0.6, 0.5)
+        assert p2 - p1 == pytest.approx(p3 - p2, rel=1e-6)
+
+    def test_custom_base_rate(self):
+        # base_rate=0.4, confidence=0.5 → 0.4 + 0.5*0.6 = 0.7
+        assert confidence_to_win_prob(0.5, 0.4) == pytest.approx(0.7)
+
+
+# ── TestCalculateKellyAllocation ──────────────────────────────
+
+
+class TestCalculateKellyAllocation:
+    def test_kelly_disabled_returns_zero(self):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": False})
-        result = calculate_adjusted_risk_pct(0.8, config)
-        assert result == 0.02
+        result = calculate_kelly_allocation(0.8, config)
+        assert result == 0.0
 
-    def test_kelly_enabled_no_confidence_returns_flat(self):
+    def test_kelly_enabled_no_confidence_returns_zero(self):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        result = calculate_adjusted_risk_pct(None, config)
-        assert result == 0.02
+        result = calculate_kelly_allocation(None, config)
+        assert result == 0.0
 
-    def test_kelly_enabled_high_confidence_capped(self):
+    def test_kelly_zero_confidence_has_edge(self):
+        # confidence=0 → win_prob=0.5, b=2, kelly=(0.5*2-0.5)/2=0.25, half=0.125
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        # Kelly for 0.8 = 0.35 → capped at risk_pct=0.02
-        result = calculate_adjusted_risk_pct(0.8, config)
-        assert result == 0.02
+        result = calculate_kelly_allocation(0.0, config)
+        assert result == pytest.approx(0.125, rel=1e-3)
 
-    def test_kelly_enabled_low_confidence_reduced(self):
+    def test_kelly_mid_confidence(self):
+        # confidence=0.3 → win_prob=0.65, b=2, kelly=(0.65*2-0.35)/2=0.475, half=0.2375
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        # Kelly for 0.35 = 0.0125 < 0.02 → uses Kelly
-        result = calculate_adjusted_risk_pct(0.35, config)
-        assert result == pytest.approx(0.0125, rel=1e-3)
+        result = calculate_kelly_allocation(0.3, config)
+        assert result == pytest.approx(0.2375, rel=1e-3)
+
+    def test_kelly_high_confidence(self):
+        # confidence=1.0 → win_prob=1.0, b=2, kelly=(1.0*2-0.0)/2=1.0, half=0.5
+        config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
+        result = calculate_kelly_allocation(1.0, config)
+        assert result == pytest.approx(0.5, rel=1e-3)
+
+    def test_respects_base_win_prob_config(self):
+        config = DEFAULT_CONFIG.model_copy(update={
+            "kelly_enabled": True, "kelly_base_win_prob": 0.4,
+        })
+        # confidence=0 → win_prob=0.4, b=2, kelly=(0.4*2-0.6)/2=0.1, half=0.05
+        result = calculate_kelly_allocation(0.0, config)
+        assert result == pytest.approx(0.05, rel=1e-3)
+
+
+# ── TestCalculatePositionSizeKelly ────────────────────────────
+
+
+class TestCalculatePositionSizeKelly:
+    def test_basic_sizing(self):
+        # equity=10000, kelly_alloc=0.125, notional=1250, entry=100000
+        # max_notional = (10000*0.02)/0.02 = 10000
+        # qty = 1250/100000 = 0.0125
+        qty = calculate_position_size_kelly(
+            Decimal("100000"), Decimal("10000"), 0.125, 0.02, 0.02,
+        )
+        assert float(qty) == pytest.approx(0.0125, rel=1e-6)
+
+    def test_risk_cap_binding(self):
+        # equity=10000, kelly_alloc=0.8, notional=8000, entry=100000
+        # max_notional = (10000*0.02)/0.02 = 10000 → not binding
+        # But with risk_pct=0.01: max_notional = (10000*0.01)/0.02 = 5000 → binding
+        qty = calculate_position_size_kelly(
+            Decimal("100000"), Decimal("10000"), 0.8, 0.01, 0.02,
+        )
+        # min(8000, 5000) = 5000, qty = 5000/100000 = 0.05
+        assert float(qty) == pytest.approx(0.05, rel=1e-6)
+
+    def test_zero_allocation_returns_zero(self):
+        qty = calculate_position_size_kelly(
+            Decimal("100000"), Decimal("10000"), 0.0, 0.02, 0.02,
+        )
+        assert qty == Decimal("0")
+
+    def test_zero_entry_price_returns_zero(self):
+        qty = calculate_position_size_kelly(
+            Decimal("0"), Decimal("10000"), 0.125, 0.02, 0.02,
+        )
+        assert qty == Decimal("0")
 
 
 # ── TestCheckMaxPositionsPerStrategy ──────────────────────────
@@ -422,18 +500,32 @@ class TestEngineRiskIntegration:
         verdict = engine.check_risk(db_session, signal, equity, NOW)
         assert verdict.allowed is True
 
-    def test_kelly_reduces_size_low_confidence(self, db_session):
+    def test_kelly_low_confidence_opens_position(self, db_session):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
         engine, pid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
 
-        signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.35)
+        signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.10)
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # Kelly risk_pct=0.0125, qty = (10000*0.0125)/(60000*0.02) = 125/1200 ≈ 0.1042
-        assert float(pos.quantity) == pytest.approx(0.1042, rel=1e-2)
+        # confidence=0.10 → win_prob=0.55, b=2, kelly=(0.55*2-0.45)/2=0.325, half=0.1625
+        # notional = 10000*0.1625 = 1625, max_notional = (10000*0.02)/0.02 = 10000
+        # qty = 1625/60000 ≈ 0.02708
+        assert float(pos.quantity) == pytest.approx(0.02708, rel=1e-2)
 
-    def test_kelly_high_confidence_same_as_fixed(self, db_session):
+    def test_kelly_zero_confidence_opens_position(self, db_session):
+        config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
+        engine, pid = _make_engine(db_session, config=config)
+        _seed_candle(db_session, "BTC", Decimal("60000"))
+
+        signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.0)
+        pos = engine.open_position(db_session, signal, Decimal("10000"))
+        assert pos is not None
+        # confidence=0 → win_prob=0.5, kelly_alloc=0.125
+        # notional = 10000*0.125 = 1250, qty = 1250/60000 ≈ 0.02083
+        assert float(pos.quantity) == pytest.approx(0.02083, rel=1e-2)
+
+    def test_kelly_high_confidence_larger_position(self, db_session):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
         engine, pid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
@@ -441,9 +533,10 @@ class TestEngineRiskIntegration:
         signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.8)
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # Kelly risk_pct=0.35, capped at 0.02 → same as fixed
-        # qty = (10000*0.02)/(60000*0.02) = 200/1200 ≈ 0.1667
-        assert float(pos.quantity) == pytest.approx(0.1667, rel=1e-2)
+        # confidence=0.8 → win_prob=0.9, b=2, kelly=(0.9*2-0.1)/2=0.85, half=0.425
+        # notional = 10000*0.425 = 4250, max_notional = 10000 → not binding
+        # qty = 4250/60000 ≈ 0.07083
+        assert float(pos.quantity) == pytest.approx(0.07083, rel=1e-2)
 
     def test_daily_loss_pause_after_stop_losses(self, db_session):
         engine, pid = _make_engine(db_session)

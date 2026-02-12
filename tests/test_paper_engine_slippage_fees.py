@@ -54,6 +54,7 @@ def paper_config():
         default_stop_loss_pct=0.02,
         default_take_profit_pct=0.04,
         default_timeout_minutes=60,
+        kelly_enabled=False,
         slippage_pct={
             "hyperliquid": 0.001,  # 0.1%
             "polymarket": 0.005,   # 0.5%
@@ -304,6 +305,7 @@ class TestSlippageFeeIntegration:
         """Test that setting slippage/fees to 0 disables them."""
         # Create config with no slippage or fees
         config = PaperConfig(
+            kelly_enabled=False,
             slippage_pct={"hyperliquid": 0.0},
             fee_pct={"hyperliquid": 0.0},
         )
