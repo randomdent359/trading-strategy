@@ -17,10 +17,12 @@ strategies:
     enabled: true
     params:
       threshold: 0.72
+      min_days_to_close: 7
   contrarian_strength:
     enabled: true
     params:
       threshold: 0.80
+      min_days_to_close: 7
   funding_rate:
     enabled: true
     params:

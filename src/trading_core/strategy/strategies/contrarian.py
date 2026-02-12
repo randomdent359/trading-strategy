@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from trading_core.models import MarketSnapshot, PolymarketMarket, Signal
 from trading_core.strategy import Strategy, register
+
+
+def _is_too_close_to_expiry(market: PolymarketMarket, min_days: int, now: datetime) -> bool:
+    """Return True if the market closes within min_days of now."""
+    if market.end_date is None or min_days <= 0:
+        return False
+    return (market.end_date - now) < timedelta(days=min_days)
 
 
 def _score_market(
@@ -49,6 +57,7 @@ class ContrarianPure(Strategy):
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)
         self.threshold = Decimal(str(self.params.get("threshold", 0.72)))
+        self.min_days_to_close = int(self.params.get("min_days_to_close", 7))
 
     def evaluate(self, snapshot: MarketSnapshot) -> Signal | None:
         if not snapshot.polymarket:
@@ -57,6 +66,8 @@ class ContrarianPure(Strategy):
         best: tuple[str, float, Decimal, PolymarketMarket] | None = None
 
         for market in snapshot.polymarket:
+            if _is_too_close_to_expiry(market, self.min_days_to_close, snapshot.ts):
+                continue
             result = _score_market(market, self.threshold)
             if result is None:
                 continue
@@ -101,6 +112,7 @@ class ContrarianStrength(Strategy):
     def __init__(self, **params: Any) -> None:
         super().__init__(**params)
         self.threshold = Decimal(str(self.params.get("threshold", 0.80)))
+        self.min_days_to_close = int(self.params.get("min_days_to_close", 7))
 
     def evaluate(self, snapshot: MarketSnapshot) -> Signal | None:
         if not snapshot.polymarket:
@@ -109,6 +121,8 @@ class ContrarianStrength(Strategy):
         best: tuple[str, float, Decimal, PolymarketMarket] | None = None
 
         for market in snapshot.polymarket:
+            if _is_too_close_to_expiry(market, self.min_days_to_close, snapshot.ts):
+                continue
             result = _score_market(market, self.threshold)
             if result is None:
                 continue

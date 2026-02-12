@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -147,6 +147,108 @@ class TestContrarianPure:
         assert sig.metadata["market_id"] == "extreme"
 
 
+    def test_filters_near_expiry_market(self):
+        """Market closing in 3 days should be filtered out."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="expiring", market_title="Expiring soon", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.95"),
+                    end_date=NOW + timedelta(days=3),
+                ),
+            ],
+        )
+        assert s.evaluate(snap) is None
+
+    def test_allows_distant_expiry_market(self):
+        """Market closing in 30 days should not be filtered."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="distant", market_title="Far out", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.85"),
+                    end_date=NOW + timedelta(days=30),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+        assert sig.direction == "SHORT"
+
+    def test_no_end_date_not_filtered(self):
+        """Market with no end_date should not be filtered."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=7)
+        sig = s.evaluate(_pm_snapshot("BTC", "0.85"))
+        assert sig is not None
+
+    def test_min_days_zero_disables_filter(self):
+        """min_days_to_close=0 disables the expiry filter."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=0)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="expiring", market_title="Expiring", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.95"),
+                    end_date=NOW + timedelta(days=1),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+
+    def test_mixed_expiry_picks_distant(self):
+        """Expiring market skipped, distant market picked."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="expiring", market_title="Near expiry", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.99"),
+                    end_date=NOW + timedelta(days=2),
+                ),
+                PolymarketMarket(
+                    market_id="distant", market_title="Far out", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.80"),
+                    end_date=NOW + timedelta(days=30),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+        assert sig.metadata["market_id"] == "distant"
+
+    def test_all_markets_expiring_no_signal(self):
+        """If all markets are near expiry, no signal should fire."""
+        s = ContrarianPure(threshold=0.72, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="BTC",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="exp1", market_title="Exp 1", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.95"),
+                    end_date=NOW + timedelta(days=1),
+                ),
+                PolymarketMarket(
+                    market_id="exp2", market_title="Exp 2", asset="BTC",
+                    ts=NOW, yes_price=Decimal("0.90"),
+                    end_date=NOW + timedelta(days=3),
+                ),
+            ],
+        )
+        assert s.evaluate(snap) is None
+
+
 # ── Contrarian Strength ─────────────────────────────────────────
 
 
@@ -167,6 +269,43 @@ class TestContrarianStrength:
         sig = s.evaluate(_pm_snapshot("SOL", "0.10"))
         assert sig is not None
         assert sig.direction == "LONG"
+
+    def test_filters_near_expiry_market(self):
+        s = ContrarianStrength(threshold=0.80, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="ETH",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="expiring", market_title="Expiring soon", asset="ETH",
+                    ts=NOW, yes_price=Decimal("0.95"),
+                    end_date=NOW + timedelta(days=3),
+                ),
+            ],
+        )
+        assert s.evaluate(snap) is None
+
+    def test_allows_distant_expiry_market(self):
+        s = ContrarianStrength(threshold=0.80, min_days_to_close=7)
+        snap = MarketSnapshot(
+            asset="ETH",
+            ts=NOW,
+            polymarket=[
+                PolymarketMarket(
+                    market_id="distant", market_title="Far out", asset="ETH",
+                    ts=NOW, yes_price=Decimal("0.88"),
+                    end_date=NOW + timedelta(days=30),
+                ),
+            ],
+        )
+        sig = s.evaluate(snap)
+        assert sig is not None
+        assert sig.direction == "SHORT"
+
+    def test_no_end_date_not_filtered(self):
+        s = ContrarianStrength(threshold=0.80, min_days_to_close=7)
+        sig = s.evaluate(_pm_snapshot("ETH", "0.88"))
+        assert sig is not None
 
 
 # ── Funding Rate ────────────────────────────────────────────────
