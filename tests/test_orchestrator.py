@@ -152,7 +152,7 @@ def _seed_funding(session, asset, n=10):
     session.commit()
 
 
-def _seed_polymarket(session, asset, n=5):
+def _seed_polymarket(session, asset, n=5, end_date=None):
     """Insert N Polymarket observation rows."""
     for i in range(n):
         session.add(PolymarketMarketRow(
@@ -164,6 +164,7 @@ def _seed_polymarket(session, asset, n=5):
             no_price=0.45 - i * 0.05,
             volume_24h=10000,
             liquidity=50000,
+            end_date=end_date,
         ))
     session.commit()
 
@@ -220,6 +221,23 @@ class TestBuildSnapshot:
         snap = build_snapshot(db_session, "BTC", funding_days=7)
         # Only recent data should be included
         assert len(snap.funding) == 3
+
+    def test_polymarket_end_date_passed_through(self, db_session):
+        future = NOW + timedelta(days=30)
+        _seed_polymarket(db_session, "BTC", n=2, end_date=future)
+        snap = build_snapshot(db_session, "BTC")
+        assert len(snap.polymarket) == 2
+        for pm in snap.polymarket:
+            assert pm.end_date is not None
+            # SQLite strips tzinfo, so compare the naive datetime parts
+            assert pm.end_date.replace(tzinfo=None) == future.replace(tzinfo=None)
+
+    def test_polymarket_null_end_date(self, db_session):
+        _seed_polymarket(db_session, "ETH", n=2, end_date=None)
+        snap = build_snapshot(db_session, "ETH")
+        assert len(snap.polymarket) == 2
+        for pm in snap.polymarket:
+            assert pm.end_date is None
 
     def test_full_snapshot(self, db_session):
         _seed_candles(db_session, "BTC", n=30)

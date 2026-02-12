@@ -101,6 +101,7 @@ def build_snapshot(
             no_price=Decimal(str(r.no_price)) if r.no_price is not None else None,
             volume_24h=Decimal(str(r.volume_24h)) if r.volume_24h is not None else None,
             liquidity=Decimal(str(r.liquidity)) if r.liquidity is not None else None,
+            end_date=r.end_date,
         )
         for r in reversed(poly_rows)  # oldest first
     ]
