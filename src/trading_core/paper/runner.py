@@ -14,6 +14,7 @@ from trading_core.config.schema import AppConfig
 from trading_core.db.engine import get_session, init_engine
 from trading_core.logging.setup import setup_logging
 from trading_core.paper.engine import PaperEngine
+from trading_core.paper.oracle import PriceOracle
 
 log = structlog.get_logger("paper_runner")
 
@@ -37,8 +38,25 @@ async def run_loop(config: AppConfig) -> None:
         except StopIteration:
             pass
 
-    engine = PaperEngine(config.paper, portfolio_id)
-    log.info("paper_engine_started", portfolio_id=portfolio_id)
+    # Start price oracle if enabled
+    oracle: PriceOracle | None = None
+    if config.paper.price_oracle_enabled:
+        hl_cfg = config.exchanges.get("hyperliquid")
+        ws_url = (
+            hl_cfg.base_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws"
+            if hl_cfg
+            else "wss://api.hyperliquid.xyz/ws"
+        )
+        oracle = PriceOracle(
+            assets=config.assets,
+            hl_ws_url=ws_url,
+            staleness_threshold_s=config.paper.price_oracle_staleness_s,
+            pm_staleness_threshold_s=config.paper.price_oracle_pm_staleness_s,
+        )
+        await oracle.start()
+
+    engine = PaperEngine(config.paper, portfolio_id, oracle=oracle)
+    log.info("paper_engine_started", portfolio_id=portfolio_id, oracle_enabled=oracle is not None)
 
     tick_interval = 5  # seconds between ticks
     mtm_interval = 60  # seconds between mark-to-market snapshots

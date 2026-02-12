@@ -1,6 +1,7 @@
 """Paper trading engine — real-price P&L from strategy signals."""
 
 from trading_core.paper.engine import PaperEngine
+from trading_core.paper.oracle import PriceEntry, PriceOracle
 from trading_core.paper.pricing import get_latest_price
 from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
 from trading_core.paper.sizing import (
@@ -14,6 +15,8 @@ from trading_core.paper.sizing import (
 
 __all__ = [
     "PaperEngine",
+    "PriceEntry",
+    "PriceOracle",
     "RiskTracker",
     "RiskVerdict",
     "evaluate_risk",

@@ -38,6 +38,10 @@ class PaperConfig(BaseModel):
     # Kelly criterion
     kelly_enabled: bool = True
     kelly_safety_factor: float = 0.5
+    # Price oracle
+    price_oracle_enabled: bool = True
+    price_oracle_staleness_s: float = 30.0
+    price_oracle_pm_staleness_s: float = 600.0
     # Slippage and fees
     slippage_pct: dict[str, float] = Field(default_factory=lambda: {
         "hyperliquid": 0.0005,  # 0.05%

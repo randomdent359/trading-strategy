@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from trading_core.paper.oracle import PriceOracle
 
 from trading_core.config.schema import PaperConfig
 from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
@@ -29,10 +33,31 @@ log = structlog.get_logger("paper_engine")
 class PaperEngine:
     """Manages paper trading positions driven by strategy signals."""
 
-    def __init__(self, config: PaperConfig, portfolio_id: int) -> None:
+    def __init__(
+        self,
+        config: PaperConfig,
+        portfolio_id: int,
+        oracle: "PriceOracle | None" = None,
+    ) -> None:
         self.config = config
         self.portfolio_id = portfolio_id
         self.risk_tracker = RiskTracker(config)
+        self.oracle = oracle
+
+    # ── Price helper ──────────────────────────────────────────
+
+    def _get_price(
+        self,
+        session: Session,
+        asset: str,
+        exchange: str,
+    ) -> Decimal | None:
+        """Delegate to oracle if available, otherwise fall back to DB."""
+        if self.oracle is not None:
+            price = self.oracle.get_price(asset, exchange, session=session)
+            if price is not None:
+                return price
+        return get_latest_price(session, asset, exchange)
 
     # ── Portfolio ──────────────────────────────────────────────
 
@@ -56,16 +81,16 @@ class PaperEngine:
     # ── Signal consumption ────────────────────────────────────
 
     def consume_signals(self, session: Session) -> list[SignalRow]:
-        """Fetch unacted Hyperliquid signals, mark them acted_on, return the list."""
-        rows = (
-            session.query(SignalRow)
-            .filter(
-                SignalRow.acted_on == False,  # noqa: E712
-                SignalRow.exchange == "hyperliquid",
-            )
-            .order_by(SignalRow.ts)
-            .all()
+        """Fetch unacted signals, mark them acted_on, return the list.
+
+        When oracle is present, consumes all exchanges. Otherwise HL-only.
+        """
+        query = session.query(SignalRow).filter(
+            SignalRow.acted_on == False,  # noqa: E712
         )
+        if self.oracle is None:
+            query = query.filter(SignalRow.exchange == "hyperliquid")
+        rows = query.order_by(SignalRow.ts).all()
         for row in rows:
             row.acted_on = True
         if rows:
@@ -93,7 +118,7 @@ class PaperEngine:
         )
 
         # Estimate new position notional value for exposure check
-        price = get_latest_price(session, signal.asset, signal.exchange)
+        price = self._get_price(session, signal.asset, signal.exchange)
         if price is None:
             new_value = Decimal("0")
         else:
@@ -124,7 +149,7 @@ class PaperEngine:
         current_equity: Decimal,
     ) -> PositionRow | None:
         """Open a new position from a signal. Returns None if no price available."""
-        price = get_latest_price(session, signal.asset, signal.exchange)
+        price = self._get_price(session, signal.asset, signal.exchange)
         if price is None:
             log.warning("no_price_for_position", asset=signal.asset)
             return None
@@ -195,7 +220,7 @@ class PaperEngine:
         timeout_delta = timedelta(minutes=self.config.default_timeout_minutes)
 
         for pos in open_positions:
-            price = get_latest_price(session, pos.asset, pos.exchange)
+            price = self._get_price(session, pos.asset, pos.exchange)
             if price is None:
                 continue
 
@@ -312,7 +337,7 @@ class PaperEngine:
         )
         unrealised = Decimal("0")
         for pos in open_positions:
-            price = get_latest_price(session, pos.asset, pos.exchange)
+            price = self._get_price(session, pos.asset, pos.exchange)
             if price is not None:
                 # Apply slippage to exit price for unrealized P&L calculation
                 slippage_pct = self.config.slippage_pct.get(pos.exchange, 0.0)
@@ -369,7 +394,7 @@ class PaperEngine:
         unrealised = Decimal("0")
         breakdown: dict[str, dict] = {}
         for pos in open_positions:
-            price = get_latest_price(session, pos.asset, pos.exchange)
+            price = self._get_price(session, pos.asset, pos.exchange)
             if price is not None:
                 # Apply slippage to exit price for unrealized P&L calculation
                 slippage_pct = self.config.slippage_pct.get(pos.exchange, 0.0)

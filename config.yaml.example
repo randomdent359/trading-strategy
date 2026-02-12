@@ -68,6 +68,10 @@ paper:
   # Kelly criterion (off by default — enable to reduce size on low-confidence signals)
   kelly_enabled: true
   kelly_safety_factor: 0.5
+  # Price oracle (real-time HL WebSocket + PM DB fallback)
+  price_oracle_enabled: true
+  price_oracle_staleness_s: 30.0        # HL cache expiry
+  price_oracle_pm_staleness_s: 600.0    # PM cache expiry (10 min)
   # Slippage and fees
   slippage_pct:
     hyperliquid: 0.0005   # 0.05% slippage
