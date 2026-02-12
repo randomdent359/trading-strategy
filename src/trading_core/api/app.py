@@ -14,6 +14,7 @@ from trading_core.db.tables.signals import SignalRow
 from trading_core.db.tables.paper import PositionRow, MarkToMarketRow, PortfolioRow
 from trading_core.db.tables.market_data import CandleRow
 from trading_core.config.loader import load_config
+from trading_core.metrics import MetricsCache, compute_strategy_metrics, compute_portfolio_metrics
 
 logger = structlog.get_logger()
 
@@ -34,6 +35,9 @@ app.add_middleware(
 
 # Load config once at startup
 config = load_config()
+
+# Metrics cache (60s TTL)
+_metrics_cache = MetricsCache(ttl_seconds=60.0)
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -67,112 +71,39 @@ async def health_check():
 async def list_strategies(session: Session = Depends(get_db)):
     """List all strategies with current performance metrics."""
     strategies = []
-    # Get all unique strategy names from positions
     strategy_names = session.execute(
         select(distinct(PositionRow.strategy))
     ).scalars().all()
 
     for strategy_name in strategy_names:
-        # Calculate metrics for each strategy
+        cache_key = f"strategy:{strategy_name}"
+        cached = _metrics_cache.get(cache_key)
+        if cached is not None:
+            strategies.append(cached)
+            continue
 
-        # Total trades (closed positions)
-        total_trades = session.execute(
-            select(func.count(PositionRow.id))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED"
-                )
-            )
-        ).scalar() or 0
+        m = compute_strategy_metrics(session, strategy_name)
 
-        # Win rate
-        wins = session.execute(
-            select(func.count(PositionRow.id))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED",
-                    PositionRow.realised_pnl > 0
-                )
-            )
-        ).scalar() or 0
-
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-
-        # Average win/loss
-        avg_win = session.execute(
-            select(func.avg(PositionRow.realised_pnl))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED",
-                    PositionRow.realised_pnl > 0
-                )
-            )
-        ).scalar() or Decimal("0")
-
-        avg_loss = session.execute(
-            select(func.avg(PositionRow.realised_pnl))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED",
-                    PositionRow.realised_pnl < 0
-                )
-            )
-        ).scalar() or Decimal("0")
-
-        # Total P&L
-        total_pnl = session.execute(
-            select(func.sum(PositionRow.realised_pnl))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED"
-                )
-            )
-        ).scalar() or Decimal("0")
-
-        # Profit factor
-        gross_profit = session.execute(
-            select(func.sum(PositionRow.realised_pnl))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED",
-                    PositionRow.realised_pnl > 0
-                )
-            )
-        ).scalar() or Decimal("0")
-
-        gross_loss = abs(session.execute(
-            select(func.sum(PositionRow.realised_pnl))
-            .where(
-                and_(
-                    PositionRow.strategy == strategy_name,
-                    PositionRow.status == "CLOSED",
-                    PositionRow.realised_pnl < 0
-                )
-            )
-        ).scalar() or Decimal("0"))
-
-        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else 0
-
-        # Check if strategy is enabled in config
         strategy_config = config.strategies.get(strategy_name, {})
         enabled = strategy_config.get("enabled", False)
 
-        strategies.append({
+        entry = {
             "name": strategy_name,
             "enabled": enabled,
-            "totalTrades": total_trades,
-            "winRate": round(win_rate, 2),
-            "avgWin": float(avg_win),
-            "avgLoss": float(avg_loss),
-            "totalPnl": float(total_pnl),
-            "profitFactor": round(profit_factor, 2),
-        })
+            "totalTrades": m.total_trades,
+            "winRate": round(m.win_rate, 2),
+            "avgWin": round(m.avg_win, 4),
+            "avgLoss": round(m.avg_loss, 4),
+            "totalPnl": round(m.total_pnl, 4),
+            "profitFactor": round(m.profit_factor, 2),
+            "sharpeRatio": round(m.sharpe_ratio, 2),
+            "sortinoRatio": round(m.sortino_ratio, 2),
+            "maxDrawdown": round(m.max_drawdown, 2),
+            "expectancy": round(m.expectancy, 2),
+            "avgHoldMinutes": round(m.avg_hold_minutes, 2),
+        }
+        _metrics_cache.set(cache_key, entry)
+        strategies.append(entry)
 
     return {"strategies": strategies}
 
@@ -464,7 +395,6 @@ async def get_asset_performance(asset: str, session: Session = Depends(get_db)):
 @app.get("/api/summary")
 async def get_portfolio_summary(session: Session = Depends(get_db)):
     """Get portfolio-level metrics."""
-    # Get default portfolio
     portfolio = session.execute(
         select(PortfolioRow).where(PortfolioRow.name == "default")
     ).scalar_one_or_none()
@@ -489,72 +419,22 @@ async def get_portfolio_summary(session: Session = Depends(get_db)):
             "dailyReturn": 0,
             "sharpeRatio": 0,
             "sortinoRatio": 0,
-            "maxDrawdown": 0
+            "maxDrawdown": 0,
+            "expectancy": 0,
+            "avgHoldMinutes": 0,
+            "profitFactor": 0,
         }
 
-    # Calculate daily returns for Sharpe/Sortino
-    # Get MTM snapshots from last 30 days
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    recent_snapshots = session.execute(
-        select(MarkToMarketRow)
-        .where(
-            and_(
-                MarkToMarketRow.portfolio_id == portfolio.id,
-                MarkToMarketRow.ts >= thirty_days_ago
-            )
-        )
-        .order_by(MarkToMarketRow.ts)
-    ).scalars().all()
+    # Check cache
+    cache_key = f"portfolio:{portfolio.id}"
+    cached_metrics = _metrics_cache.get(cache_key)
+    if cached_metrics is None:
+        cached_metrics = compute_portfolio_metrics(session, portfolio.id)
+        _metrics_cache.set(cache_key, cached_metrics)
 
-    # Calculate daily returns
-    daily_returns = []
-    if len(recent_snapshots) > 1:
-        for i in range(1, len(recent_snapshots)):
-            prev_equity = recent_snapshots[i-1].total_equity
-            curr_equity = recent_snapshots[i].total_equity
+    m = cached_metrics
 
-            if prev_equity > 0:
-                daily_return = float((curr_equity - prev_equity) / prev_equity)
-                daily_returns.append(daily_return)
-
-    # Calculate metrics
-    sharpe_ratio = 0
-    sortino_ratio = 0
-    max_drawdown = 0
-
-    if daily_returns:
-        import numpy as np
-
-        returns_array = np.array(daily_returns)
-        mean_return = np.mean(returns_array)
-        std_return = np.std(returns_array)
-
-        if std_return > 0:
-            sharpe_ratio = mean_return / std_return * np.sqrt(252)  # Annualized
-
-        # Sortino ratio (downside deviation)
-        negative_returns = returns_array[returns_array < 0]
-        if len(negative_returns) > 0:
-            downside_std = np.std(negative_returns)
-            if downside_std > 0:
-                sortino_ratio = mean_return / downside_std * np.sqrt(252)
-
-    # Calculate max drawdown
-    if recent_snapshots:
-        peak_equity = recent_snapshots[0].total_equity
-        max_dd_pct = 0
-
-        for snapshot in recent_snapshots:
-            if snapshot.total_equity > peak_equity:
-                peak_equity = snapshot.total_equity
-
-            drawdown = (peak_equity - snapshot.total_equity) / peak_equity
-            if drawdown > max_dd_pct:
-                max_dd_pct = drawdown
-
-        max_drawdown = float(max_dd_pct * 100)  # As percentage
-
-    # Get current day's P&L
+    # Get current day's P&L (not part of metrics module — depends on wall clock)
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_mtm = session.execute(
         select(MarkToMarketRow)
@@ -578,9 +458,12 @@ async def get_portfolio_summary(session: Session = Depends(get_db)):
         "realisedPnl": float(latest_mtm.realised_pnl),
         "openPositions": latest_mtm.open_positions,
         "dailyPnl": daily_pnl,
-        "sharpeRatio": round(sharpe_ratio, 2),
-        "sortinoRatio": round(sortino_ratio, 2),
-        "maxDrawdown": round(max_drawdown, 2),
+        "sharpeRatio": round(m.sharpe_ratio, 2),
+        "sortinoRatio": round(m.sortino_ratio, 2),
+        "maxDrawdown": round(m.max_drawdown, 2),
+        "expectancy": round(m.expectancy, 2),
+        "avgHoldMinutes": round(m.avg_hold_minutes, 2),
+        "profitFactor": round(m.profit_factor, 2),
         "lastUpdate": latest_mtm.ts.isoformat()
     }
 
