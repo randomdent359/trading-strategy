@@ -217,7 +217,7 @@ async def get_strategy_signals(
                 "direction": s.direction,
                 "confidence": float(s.confidence) if s.confidence else None,
                 "entryPrice": float(s.entry_price) if s.entry_price else None,
-                "metadata": s.metadata,
+                "metadata": s.metadata_,
                 "actedOn": s.acted_on
             }
             for s in signals
@@ -270,7 +270,7 @@ async def get_strategy_trades(
                 "exitReason": p.exit_reason,
                 "realisedPnl": float(p.realised_pnl) if p.realised_pnl else None,
                 "status": p.status,
-                "metadata": p.metadata
+                "metadata": p.metadata_
             }
             for p in positions
         ],
@@ -394,7 +394,7 @@ async def get_open_positions(session: Session = Depends(get_db)):
             "quantity": float(position.quantity),
             "currentPrice": float(current_price) if current_price else None,
             "unrealisedPnl": float(unrealised_pnl),
-            "metadata": position.metadata
+            "metadata": position.metadata_
         })
 
     return {"positions": open_positions}
