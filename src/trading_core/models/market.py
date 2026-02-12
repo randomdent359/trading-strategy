@@ -44,6 +44,7 @@ class PolymarketMarket(BaseModel):
     no_price: Decimal | None = None
     volume_24h: Decimal | None = None
     liquidity: Decimal | None = None
+    end_date: datetime | None = None
 
 
 class MarketSnapshot(BaseModel):

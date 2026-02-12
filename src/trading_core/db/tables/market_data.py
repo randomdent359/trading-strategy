@@ -60,3 +60,4 @@ class PolymarketMarketRow(Base):
     no_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     volume_24h: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     liquidity: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    end_date: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
