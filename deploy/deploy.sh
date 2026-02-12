@@ -25,7 +25,7 @@ echo ""
 echo "Deploying trading-core package..."
 rsync -az --delete \
   -e "ssh -i ~/.ssh/id_ed25519" \
-  "${REPO_DIR}/src/" "${REPO_DIR}/pyproject.toml" \
+  "${REPO_DIR}/src" "${REPO_DIR}/pyproject.toml" \
   "${REMOTE_HOST}:${TRADING_HOME}/repo/"
 echo "Package files synced"
 
@@ -103,7 +103,7 @@ if [ -z "$DB_URL" ]; then
 else
   cd ~/trading/repo
   TRADING_DATABASE_URL="$DB_URL" python3 -m alembic \
-    -c trading_core/migrations/alembic.ini upgrade head 2>&1
+    -c src/trading_core/migrations/alembic.ini upgrade head 2>&1
   echo "  Migrations complete"
 fi
 EOFSH
