@@ -14,7 +14,6 @@ from trading_core.db.tables.signals import SignalRow
 from trading_core.db.tables.paper import PositionRow, MarkToMarketRow, PortfolioRow
 from trading_core.db.tables.market_data import CandleRow
 from trading_core.config.loader import load_config
-from trading_core.strategy.registry import get_registry
 
 logger = structlog.get_logger()
 
