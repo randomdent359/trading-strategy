@@ -89,6 +89,46 @@ EOFSH
 echo "Permissions set"
 echo ""
 
+# --- Alembic migrations ---
+echo "Running database migrations..."
+ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
+# Extract TRADING_DATABASE_URL from an installed service file
+DB_URL=$(grep -h 'TRADING_DATABASE_URL=' /etc/systemd/system/*.service 2>/dev/null \
+  | head -1 \
+  | sed 's/.*TRADING_DATABASE_URL=//' \
+  | tr -d '"')
+
+if [ -z "$DB_URL" ]; then
+  echo "  WARNING: No TRADING_DATABASE_URL found in service files, skipping migrations"
+else
+  cd ~/trading/repo
+  TRADING_DATABASE_URL="$DB_URL" python3 -m alembic \
+    -c trading_core/migrations/alembic.ini upgrade head 2>&1
+  echo "  Migrations complete"
+fi
+EOFSH
+
+echo ""
+
+# --- Restart active services ---
+echo "Restarting services that were running..."
+ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
+ALL_SERVICES="hyperliquid-collector polymarket-collector strategy-orchestrator contrarian-monitor polymarket-strength-filtered hyperliquid-funding hyperliquid-funding-oi paper-trader"
+restarted=""
+for svc in $ALL_SERVICES; do
+  if sudo systemctl is-active --quiet "$svc" 2>/dev/null; then
+    sudo systemctl restart "$svc"
+    restarted="$restarted $svc"
+    echo "  $svc restarted"
+  fi
+done
+if [ -z "$restarted" ]; then
+  echo "  No services were running"
+fi
+EOFSH
+
+echo ""
+
 # --- Verify ---
 echo "Verifying deployment..."
 ssh -i ~/.ssh/id_ed25519 "${REMOTE_HOST}" << 'EOFSH'
@@ -121,7 +161,6 @@ EOFSH
 echo ""
 echo "Deployment complete!"
 echo ""
-echo "Next steps:"
-echo "  Start new services:    sudo systemctl start hyperliquid-collector polymarket-collector strategy-orchestrator"
-echo "  View logs:             journalctl -u strategy-orchestrator -f"
-echo "  Check status:          sudo systemctl status hyperliquid-collector polymarket-collector strategy-orchestrator"
+echo "Useful commands:"
+echo "  View logs:             ssh ${REMOTE_HOST} journalctl -u strategy-orchestrator -f"
+echo "  Check status:          ssh ${REMOTE_HOST} sudo systemctl status hyperliquid-collector polymarket-collector strategy-orchestrator"
