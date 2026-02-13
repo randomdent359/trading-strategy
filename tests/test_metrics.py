@@ -7,11 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import BigInteger, Integer, JSON, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Session
 
-from trading_core.db.base import Base
 from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
 from trading_core.metrics.cache import MetricsCache
 from trading_core.metrics.formulas import (
@@ -27,34 +23,6 @@ from trading_core.metrics.formulas import (
 from trading_core.metrics.queries import compute_portfolio_metrics, compute_strategy_metrics
 
 NOW = datetime.now(timezone.utc)
-
-
-# ── DB fixture (same pattern as test_paper_engine) ────────────
-
-
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session with all schemas/tables created."""
-    engine = create_engine("sqlite:///:memory:")
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, _rec):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    for table in Base.metadata.tables.values():
-        table.schema = None
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                col.type = JSON()
-            if isinstance(col.type, BigInteger):
-                col.type = Integer()
-
-    Base.metadata.create_all(engine)
-
-    session = Session(engine)
-    yield session
-    session.close()
-    engine.dispose()
 
 
 def _seed_portfolio(session: Session, capital: float = 10000) -> PortfolioRow:

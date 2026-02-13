@@ -6,14 +6,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import BigInteger, Integer, JSON, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Session
 
 from trading_core.config.schema import PaperConfig
-from trading_core.db.base import Base
 from trading_core.db.tables.market_data import CandleRow
-from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
+from trading_core.db.tables.accounts import AccountMarkToMarketRow, AccountPositionRow, AccountRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.engine import PaperEngine
 from trading_core.paper.pricing import get_latest_price
@@ -33,33 +29,9 @@ DEFAULT_CONFIG = PaperConfig(
     default_take_profit_pct=0.04,
     default_timeout_minutes=60,
     kelly_enabled=False,
+    slippage_pct={"hyperliquid": 0.0, "polymarket": 0.0},
+    fee_pct={"hyperliquid": 0.0, "polymarket": 0.0},
 )
-
-
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session with all schemas/tables created."""
-    engine = create_engine("sqlite:///:memory:")
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, _rec):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    # SQLite doesn't support schemas, JSONB, or BigInteger autoincrement
-    for table in Base.metadata.tables.values():
-        table.schema = None
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                col.type = JSON()
-            if isinstance(col.type, BigInteger):
-                col.type = Integer()
-
-    Base.metadata.create_all(engine)
-
-    session = Session(engine)
-    yield session
-    session.close()
-    engine.dispose()
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -109,16 +81,22 @@ def _seed_signal(
     return row
 
 
-def _create_portfolio(session, name="default", initial_capital=10000):
-    """Create a portfolio and return its ID."""
-    return PaperEngine.ensure_portfolio(session, name=name, initial_capital=initial_capital)
+def _create_account(session, name="default", exchange="hyperliquid",
+                    strategy="funding_rate", initial_capital=10000):
+    """Create an account and return its ID."""
+    return PaperEngine.ensure_account(
+        session, name=name, exchange=exchange,
+        strategy=strategy, initial_capital=initial_capital,
+    )
 
 
-def _make_engine(session, config=None, portfolio_name="default", initial_capital=10000):
-    """Create a PaperEngine with a portfolio."""
+def _make_engine(session, config=None, account_name="default", exchange="hyperliquid",
+                 strategy="funding_rate", initial_capital=10000):
+    """Create a PaperEngine with an account."""
     cfg = config or DEFAULT_CONFIG
-    pid = _create_portfolio(session, name=portfolio_name, initial_capital=initial_capital)
-    return PaperEngine(cfg, pid), pid
+    aid = _create_account(session, name=account_name, exchange=exchange,
+                          strategy=strategy, initial_capital=initial_capital)
+    return PaperEngine(cfg, aid, exchange, strategy), aid
 
 
 # ── TestPositionSizing ────────────────────────────────────────
@@ -189,54 +167,62 @@ class TestPricing:
         assert price is None
 
 
-# ── TestEnsurePortfolio ───────────────────────────────────────
+# ── TestEnsureAccount ───────────────────────────────────────
 
 
-class TestEnsurePortfolio:
+class TestEnsureAccount:
     def test_creates_if_not_exists(self, db_session):
-        pid = PaperEngine.ensure_portfolio(db_session, "test_portfolio", 5000)
-        row = db_session.get(PortfolioRow, pid)
+        aid = PaperEngine.ensure_account(
+            db_session, "test_account", "hyperliquid", "funding_rate", 5000,
+        )
+        row = db_session.get(AccountRow, aid)
         assert row is not None
-        assert row.name == "test_portfolio"
+        assert row.name == "test_account"
         assert float(row.initial_capital) == 5000
+        assert row.exchange == "hyperliquid"
+        assert row.strategy == "funding_rate"
 
     def test_returns_existing(self, db_session):
-        pid1 = PaperEngine.ensure_portfolio(db_session, "default", 10000)
-        pid2 = PaperEngine.ensure_portfolio(db_session, "default", 10000)
-        assert pid1 == pid2
+        aid1 = PaperEngine.ensure_account(
+            db_session, "default", "hyperliquid", "funding_rate", 10000,
+        )
+        aid2 = PaperEngine.ensure_account(
+            db_session, "default", "hyperliquid", "funding_rate", 10000,
+        )
+        assert aid1 == aid2
 
 
 # ── TestConsumeSignals ────────────────────────────────────────
 
 
 class TestConsumeSignals:
-    def test_fetches_unacted_hyperliquid_only(self, db_session):
-        engine, _ = _make_engine(db_session)
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False, asset="ETH")
+    def test_fetches_unacted_matching_signals(self, db_session):
+        engine, _ = _make_engine(db_session, strategy="funding_rate")
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False, asset="ETH")
         signals = engine.consume_signals(db_session)
         assert len(signals) == 2
         assert all(s.exchange == "hyperliquid" for s in signals)
 
     def test_marks_acted_on(self, db_session):
-        engine, _ = _make_engine(db_session)
-        sig = _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
+        engine, _ = _make_engine(db_session, strategy="funding_rate")
+        sig = _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
         engine.consume_signals(db_session)
         db_session.refresh(sig)
         assert sig.acted_on is True
 
-    def test_skips_polymarket_signals(self, db_session):
-        engine, _ = _make_engine(db_session)
-        _seed_signal(db_session, exchange="polymarket", acted_on=False)
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
+    def test_skips_other_strategy_signals(self, db_session):
+        engine, _ = _make_engine(db_session, strategy="funding_rate")
+        _seed_signal(db_session, exchange="hyperliquid", strategy="rsi_mean_reversion", acted_on=False)
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
         signals = engine.consume_signals(db_session)
         assert len(signals) == 1
-        assert signals[0].exchange == "hyperliquid"
+        assert signals[0].strategy == "funding_rate"
 
     def test_skips_already_acted(self, db_session):
-        engine, _ = _make_engine(db_session)
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=True)
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
+        engine, _ = _make_engine(db_session, strategy="funding_rate")
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=True)
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
         signals = engine.consume_signals(db_session)
         assert len(signals) == 1
 
@@ -248,7 +234,7 @@ class TestOpenPosition:
     def test_creates_position_with_correct_quantity(self, db_session):
         engine, _ = _make_engine(db_session, initial_capital=10000)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-        signal = _seed_signal(db_session, asset="BTC", direction="LONG")
+        signal = _seed_signal(db_session, asset="BTC", direction="LONG", strategy="funding_rate")
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
         assert pos.status == "OPEN"
@@ -259,13 +245,13 @@ class TestOpenPosition:
     def test_links_signal_id(self, db_session):
         engine, _ = _make_engine(db_session)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-        signal = _seed_signal(db_session)
+        signal = _seed_signal(db_session, strategy="funding_rate")
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos.signal_id == signal.id
 
     def test_returns_none_if_no_price(self, db_session):
         engine, _ = _make_engine(db_session)
-        signal = _seed_signal(db_session, asset="BTC")
+        signal = _seed_signal(db_session, asset="BTC", strategy="funding_rate")
         # No candles seeded — no price available
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is None
@@ -274,11 +260,11 @@ class TestOpenPosition:
 # ── TestCheckExits ────────────────────────────────────────────
 
 
-def _open_position_directly(session, portfolio_id, asset="BTC", direction="LONG",
+def _open_position_directly(session, account_id, asset="BTC", direction="LONG",
                             entry_price=60000, quantity=0.1667, minutes_ago=0):
     """Insert a position row directly for exit testing."""
-    pos = PositionRow(
-        portfolio_id=portfolio_id,
+    pos = AccountPositionRow(
+        account_id=account_id,
         strategy="funding_rate",
         asset=asset,
         exchange="hyperliquid",
@@ -297,8 +283,8 @@ def _open_position_directly(session, portfolio_id, asset="BTC", direction="LONG"
 
 class TestCheckExits:
     def test_stop_loss_long(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, direction="LONG", entry_price=60000)
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, direction="LONG", entry_price=60000)
         # Price drops below stop: 60000 * (1 - 0.02) = 58800
         _seed_candle(db_session, "BTC", Decimal("58700"))
         closed = engine.check_exits(db_session, NOW)
@@ -306,8 +292,8 @@ class TestCheckExits:
         assert closed[0].exit_reason == "stop_loss"
 
     def test_stop_loss_short(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, direction="SHORT", entry_price=60000)
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, direction="SHORT", entry_price=60000)
         # Price rises above stop: 60000 * (1 + 0.02) = 61200
         _seed_candle(db_session, "BTC", Decimal("61300"))
         closed = engine.check_exits(db_session, NOW)
@@ -315,8 +301,8 @@ class TestCheckExits:
         assert closed[0].exit_reason == "stop_loss"
 
     def test_take_profit_long(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, direction="LONG", entry_price=60000)
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, direction="LONG", entry_price=60000)
         # Price rises above TP: 60000 * (1 + 0.04) = 62400
         _seed_candle(db_session, "BTC", Decimal("62500"))
         closed = engine.check_exits(db_session, NOW)
@@ -324,8 +310,8 @@ class TestCheckExits:
         assert closed[0].exit_reason == "take_profit"
 
     def test_take_profit_short(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, direction="SHORT", entry_price=60000)
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, direction="SHORT", entry_price=60000)
         # Price drops below TP: 60000 * (1 - 0.04) = 57600
         _seed_candle(db_session, "BTC", Decimal("57500"))
         closed = engine.check_exits(db_session, NOW)
@@ -333,9 +319,9 @@ class TestCheckExits:
         assert closed[0].exit_reason == "take_profit"
 
     def test_timeout(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         # Position opened 61 minutes ago
-        _open_position_directly(db_session, pid, direction="LONG", entry_price=60000, minutes_ago=61)
+        _open_position_directly(db_session, aid, direction="LONG", entry_price=60000, minutes_ago=61)
         # Price within bounds (no stop or TP hit)
         _seed_candle(db_session, "BTC", Decimal("60100"))
         closed = engine.check_exits(db_session, NOW)
@@ -343,8 +329,8 @@ class TestCheckExits:
         assert closed[0].exit_reason == "timeout"
 
     def test_no_exit_within_bounds(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, direction="LONG", entry_price=60000, minutes_ago=10)
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, direction="LONG", entry_price=60000, minutes_ago=10)
         # Price is between stop (58800) and TP (62400), within timeout
         _seed_candle(db_session, "BTC", Decimal("60500"))
         closed = engine.check_exits(db_session, NOW)
@@ -356,24 +342,24 @@ class TestCheckExits:
 
 class TestClosePosition:
     def test_pnl_long_win(self, db_session):
-        engine, pid = _make_engine(db_session)
-        pos = _open_position_directly(db_session, pid, direction="LONG", entry_price=60000, quantity=0.5)
+        engine, aid = _make_engine(db_session)
+        pos = _open_position_directly(db_session, aid, direction="LONG", entry_price=60000, quantity=0.5)
         engine.close_position(db_session, pos, Decimal("61000"), "take_profit")
         assert pos.status == "CLOSED"
         # (61000 - 60000) * 0.5 = 500
         assert float(pos.realised_pnl) == pytest.approx(500.0)
 
     def test_pnl_short_win(self, db_session):
-        engine, pid = _make_engine(db_session)
-        pos = _open_position_directly(db_session, pid, direction="SHORT", entry_price=60000, quantity=0.5)
+        engine, aid = _make_engine(db_session)
+        pos = _open_position_directly(db_session, aid, direction="SHORT", entry_price=60000, quantity=0.5)
         engine.close_position(db_session, pos, Decimal("59000"), "take_profit")
         assert pos.status == "CLOSED"
         # (60000 - 59000) * 0.5 = 500
         assert float(pos.realised_pnl) == pytest.approx(500.0)
 
     def test_updates_all_fields(self, db_session):
-        engine, pid = _make_engine(db_session)
-        pos = _open_position_directly(db_session, pid, direction="LONG", entry_price=60000)
+        engine, aid = _make_engine(db_session)
+        pos = _open_position_directly(db_session, aid, direction="LONG", entry_price=60000)
         engine.close_position(db_session, pos, Decimal("58000"), "stop_loss")
         assert pos.status == "CLOSED"
         assert pos.exit_reason == "stop_loss"
@@ -387,13 +373,13 @@ class TestClosePosition:
 
 class TestMarkToMarket:
     def test_equity_calculation(self, db_session):
-        engine, pid = _make_engine(db_session, initial_capital=10000)
+        engine, aid = _make_engine(db_session, initial_capital=10000)
         # Close a position with 500 profit
-        pos = _open_position_directly(db_session, pid, direction="LONG", entry_price=60000, quantity=0.5)
+        pos = _open_position_directly(db_session, aid, direction="LONG", entry_price=60000, quantity=0.5)
         engine.close_position(db_session, pos, Decimal("61000"), "take_profit")
 
         # Open a position with unrealised gain
-        _open_position_directly(db_session, pid, direction="LONG", entry_price=50000, quantity=0.1, asset="ETH")
+        _open_position_directly(db_session, aid, direction="LONG", entry_price=50000, quantity=0.1, asset="ETH")
         _seed_candle(db_session, "ETH", Decimal("51000"))
 
         equity = engine.get_current_equity(db_session)
@@ -401,15 +387,15 @@ class TestMarkToMarket:
         assert float(equity) == pytest.approx(10600.0)
 
     def test_breakdown_by_strategy(self, db_session):
-        engine, pid = _make_engine(db_session, initial_capital=10000)
+        engine, aid = _make_engine(db_session, initial_capital=10000)
 
         # Two open positions with different strategies
-        pos1 = PositionRow(
-            portfolio_id=pid, strategy="funding_rate", asset="BTC", exchange="hyperliquid",
+        pos1 = AccountPositionRow(
+            account_id=aid, strategy="funding_rate", asset="BTC", exchange="hyperliquid",
             direction="LONG", entry_price=60000, entry_ts=NOW, quantity=0.1, status="OPEN", metadata_={},
         )
-        pos2 = PositionRow(
-            portfolio_id=pid, strategy="rsi_mean_reversion", asset="ETH", exchange="hyperliquid",
+        pos2 = AccountPositionRow(
+            account_id=aid, strategy="rsi_mean_reversion", asset="ETH", exchange="hyperliquid",
             direction="SHORT", entry_price=3000, entry_ts=NOW, quantity=1.0, status="OPEN", metadata_={},
         )
         db_session.add_all([pos1, pos2])
@@ -420,16 +406,16 @@ class TestMarkToMarket:
 
         engine.write_mark_to_market(db_session, NOW)
 
-        mtm = db_session.query(MarkToMarketRow).first()
+        mtm = db_session.query(AccountMarkToMarketRow).first()
         assert mtm is not None
         assert mtm.open_positions == 2
         assert "funding_rate" in mtm.breakdown
         assert "rsi_mean_reversion" in mtm.breakdown
 
     def test_writes_row(self, db_session):
-        engine, pid = _make_engine(db_session, initial_capital=10000)
+        engine, aid = _make_engine(db_session, initial_capital=10000)
         engine.write_mark_to_market(db_session, NOW)
-        rows = db_session.query(MarkToMarketRow).all()
+        rows = db_session.query(AccountMarkToMarketRow).all()
         assert len(rows) == 1
         assert float(rows[0].total_equity) == pytest.approx(10000.0)
         assert rows[0].open_positions == 0

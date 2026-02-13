@@ -6,43 +6,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import BigInteger, Integer, JSON, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Session
 
 from trading_core.config.schema import PaperConfig
-from trading_core.db.base import Base
 from trading_core.db.tables.market_data import CandleRow
-from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
+from trading_core.db.tables.accounts import AccountMarkToMarketRow, AccountPositionRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.engine import PaperEngine
 
 NOW = datetime.now(timezone.utc)
-
-
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session with all schemas/tables created."""
-    engine = create_engine("sqlite:///:memory:")
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, _rec):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    # SQLite doesn't support schemas, JSONB, or BigInteger autoincrement
-    for table in Base.metadata.tables.values():
-        table.schema = None
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                col.type = JSON()
-            elif isinstance(col.type, BigInteger) and col.autoincrement:
-                col.type = Integer()
-
-    Base.metadata.create_all(engine)
-
-    with Session(engine) as session:
-        yield session
-        session.rollback()
 
 
 @pytest.fixture
@@ -67,21 +38,29 @@ def paper_config():
 
 
 @pytest.fixture
-def setup_portfolio(db_session):
-    """Create a portfolio and return its ID."""
-    portfolio_id = PaperEngine.ensure_portfolio(db_session, "test", 10000)
-    return portfolio_id
+def setup_account(db_session):
+    """Create an account and return (engine, account_id)."""
+    def _setup(config, exchange="hyperliquid", strategy="test_strategy"):
+        aid = PaperEngine.ensure_account(
+            db_session, f"test_{exchange}_{strategy}", exchange, strategy, 10000,
+        )
+        engine = PaperEngine(config, aid, exchange, strategy)
+        return engine, aid
+    return _setup
 
 
 @pytest.fixture
 def add_candle(db_session):
-    """Helper to add a candle."""
+    """Helper to add a candle with auto-incrementing timestamp."""
+    counter = {"n": 0}
+
     def _add(asset="BTC", exchange="hyperliquid", close_price=100.0):
+        counter["n"] += 1
         candle = CandleRow(
             exchange=exchange,
             asset=asset,
             interval="1m",
-            open_time=NOW,
+            open_time=NOW - timedelta(minutes=100 - counter["n"]),
             open=close_price,
             high=close_price,
             low=close_price,
@@ -113,7 +92,7 @@ def add_signal(db_session):
             direction=direction,
             confidence=confidence,
             entry_price=entry_price,
-            metadata={},
+            metadata_={},
             acted_on=False,
         )
         db_session.add(signal)
@@ -126,9 +105,9 @@ def add_signal(db_session):
 class TestSlippageFeeIntegration:
     """Test that slippage and fees are correctly applied in the paper engine."""
 
-    def test_position_entry_with_slippage(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_position_entry_with_slippage(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that slippage is applied when opening a position."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Add market data
         add_candle(asset="BTC", exchange="hyperliquid", close_price=100.0)
@@ -142,16 +121,16 @@ class TestSlippageFeeIntegration:
         assert position is not None
         # With 0.1% slippage on LONG entry, we pay more
         expected_entry = 100.0 * 1.001  # 100.10
-        assert position.entry_price == pytest.approx(expected_entry, rel=1e-6)
+        assert float(position.entry_price) == pytest.approx(expected_entry, rel=1e-6)
 
         # Check metadata
         assert position.metadata_ is not None
         assert position.metadata_["raw_price"] == 100.0
         assert position.metadata_["slippage_pct"] == 0.001
 
-    def test_position_exit_with_slippage_and_fees(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_position_exit_with_slippage_and_fees(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that slippage and fees are applied when closing a position."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Add initial market data
         add_candle(asset="BTC", exchange="hyperliquid", close_price=100.0)
@@ -169,16 +148,16 @@ class TestSlippageFeeIntegration:
         # Verify exit price has slippage applied
         # LONG exit with 0.1% slippage: receive less
         expected_exit = 110.0 * 0.999  # 109.89
-        assert position.exit_price == pytest.approx(expected_exit, rel=1e-6)
+        assert float(position.exit_price) == pytest.approx(expected_exit, rel=1e-6)
 
         # Verify fees were deducted from P&L
         assert position.realised_pnl is not None
         assert position.metadata_["fees"] > 0
         assert position.metadata_["gross_pnl"] > position.realised_pnl
 
-    def test_short_position_slippage(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_short_position_slippage(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test slippage for SHORT positions."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Add market data
         add_candle(asset="ETH", exchange="hyperliquid", close_price=2000.0)
@@ -192,7 +171,7 @@ class TestSlippageFeeIntegration:
         assert position is not None
         # With 0.1% slippage on SHORT entry, we receive less
         expected_entry = 2000.0 * 0.999  # 1998.00
-        assert position.entry_price == pytest.approx(expected_entry, rel=1e-6)
+        assert float(position.entry_price) == pytest.approx(expected_entry, rel=1e-6)
 
         # Price drops to 1900 (profitable short)
         add_candle(asset="ETH", exchange="hyperliquid", close_price=1900.0)
@@ -202,14 +181,14 @@ class TestSlippageFeeIntegration:
 
         # SHORT exit with 0.1% slippage: pay more
         expected_exit = 1900.0 * 1.001  # 1901.90
-        assert position.exit_price == pytest.approx(expected_exit, rel=1e-6)
+        assert float(position.exit_price) == pytest.approx(expected_exit, rel=1e-6)
 
         # Should be profitable even after slippage and fees
         assert position.realised_pnl > 0
 
-    def test_polymarket_higher_slippage(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_polymarket_higher_slippage(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that Polymarket positions use higher slippage."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config, exchange="polymarket", strategy="test_strategy")
 
         # Add market data for Polymarket
         add_candle(asset="BTC", exchange="polymarket", close_price=50000.0)
@@ -223,14 +202,14 @@ class TestSlippageFeeIntegration:
         assert position is not None
         # With 0.5% slippage on LONG entry
         expected_entry = 50000.0 * 1.005  # 50250.00
-        assert position.entry_price == pytest.approx(expected_entry, rel=1e-6)
+        assert float(position.entry_price) == pytest.approx(expected_entry, rel=1e-6)
 
         # Verify correct slippage percentage in metadata
         assert position.metadata_["slippage_pct"] == 0.005
 
-    def test_unrealized_pnl_includes_slippage_fees(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_unrealized_pnl_includes_slippage_fees(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that unrealized P&L calculation includes slippage and fees."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Add initial market data
         add_candle(asset="BTC", exchange="hyperliquid", close_price=100.0)
@@ -250,9 +229,9 @@ class TestSlippageFeeIntegration:
         # Actual: considers exit slippage and round-trip fees
         assert equity < Decimal("10000") + (Decimal("105") - Decimal("100.1")) * Decimal(str(position.quantity))
 
-    def test_mark_to_market_with_costs(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_mark_to_market_with_costs(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that mark-to-market snapshots include slippage and fees."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Open multiple positions
         positions = []
@@ -270,7 +249,7 @@ class TestSlippageFeeIntegration:
         engine.write_mark_to_market(db_session, NOW)
 
         # Verify MTM was written
-        mtm = db_session.query(MarkToMarketRow).first()
+        mtm = db_session.query(AccountMarkToMarketRow).first()
         assert mtm is not None
         assert mtm.open_positions == 3
         assert mtm.unrealised_pnl > 0  # Profitable but reduced by costs
@@ -280,9 +259,9 @@ class TestSlippageFeeIntegration:
         assert mtm.breakdown["test_strategy"]["open_positions"] == 3
         assert mtm.breakdown["test_strategy"]["unrealised_pnl"] > 0
 
-    def test_stop_loss_with_slippage(self, db_session, paper_config, setup_portfolio, add_candle, add_signal):
+    def test_stop_loss_with_slippage(self, db_session, paper_config, setup_account, add_candle, add_signal):
         """Test that stop loss triggers consider slippage."""
-        engine = PaperEngine(paper_config, setup_portfolio)
+        engine, aid = setup_account(paper_config)
 
         # Open a LONG position at 100
         add_candle(asset="BTC", exchange="hyperliquid", close_price=100.0)
@@ -301,7 +280,7 @@ class TestSlippageFeeIntegration:
         assert closed[0].exit_reason == "stop_loss"
         assert closed[0].realised_pnl < 0  # Loss due to stop + slippage + fees
 
-    def test_no_slippage_fees_when_disabled(self, db_session, setup_portfolio, add_candle, add_signal):
+    def test_no_slippage_fees_when_disabled(self, db_session, setup_account, add_candle, add_signal):
         """Test that setting slippage/fees to 0 disables them."""
         # Create config with no slippage or fees
         config = PaperConfig(
@@ -309,18 +288,18 @@ class TestSlippageFeeIntegration:
             slippage_pct={"hyperliquid": 0.0},
             fee_pct={"hyperliquid": 0.0},
         )
-        engine = PaperEngine(config, setup_portfolio)
+        engine, aid = setup_account(config)
 
         # Open and close a position
         add_candle(asset="BTC", exchange="hyperliquid", close_price=100.0)
         signal = add_signal(direction="LONG", entry_price=100.0)
         position = engine.open_position(db_session, signal, Decimal("10000"))
 
-        assert position.entry_price == 100.0  # No slippage
+        assert float(position.entry_price) == 100.0  # No slippage
 
         add_candle(asset="BTC", exchange="hyperliquid", close_price=110.0)
         engine.close_position(db_session, position, Decimal("110.0"), "take_profit")
 
-        assert position.exit_price == 110.0  # No slippage
+        assert float(position.exit_price) == 110.0  # No slippage
         assert position.metadata_["fees"] == 0.0  # No fees
-        assert position.realised_pnl == position.metadata_["gross_pnl"]  # Net = Gross
+        assert float(position.realised_pnl) == pytest.approx(position.metadata_["gross_pnl"])  # Net = Gross

@@ -2,19 +2,33 @@
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, func, and_, or_, distinct
+from pydantic import BaseModel
+from sqlalchemy import select, func, and_, distinct
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import List, Dict, Optional, Any, Generator
+from typing import Optional, Generator
 import structlog
 
 from trading_core.db.engine import get_session as _get_session, init_engine
 from trading_core.db.tables.signals import SignalRow
 from trading_core.db.tables.paper import PositionRow, MarkToMarketRow, PortfolioRow
+from trading_core.db.tables.accounts import (
+    AccountMarkToMarketRow,
+    AccountPositionRow,
+    AccountRow,
+    PortfolioGroupRow,
+    PortfolioMemberRow,
+)
 from trading_core.db.tables.market_data import CandleRow
 from trading_core.config.loader import load_config
-from trading_core.metrics import MetricsCache, compute_strategy_metrics, compute_portfolio_metrics
+from trading_core.metrics import (
+    MetricsCache,
+    compute_account_metrics,
+    compute_portfolio_group_metrics,
+    compute_strategy_metrics,
+    compute_portfolio_metrics,
+)
 import trading_core.strategy.strategies  # noqa: F401 — trigger @register decorators
 from trading_core.strategy import STRATEGY_REGISTRY
 
@@ -69,15 +83,470 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
+# ═══════════════════════════════════════════════════════════════
+# Account CRUD
+# ═══════════════════════════════════════════════════════════════
+
+
+class CreateAccountRequest(BaseModel):
+    name: str
+    exchange: str
+    strategy: str
+    initial_capital: float = 10000
+
+
+class PatchAccountRequest(BaseModel):
+    name: Optional[str] = None
+    active: Optional[bool] = None
+
+
+@app.get("/api/accounts")
+async def list_accounts(session: Session = Depends(get_db)):
+    """List all accounts with current equity snapshot."""
+    accounts = session.execute(
+        select(AccountRow).order_by(AccountRow.id)
+    ).scalars().all()
+
+    result = []
+    for acct in accounts:
+        # Latest MTM for quick equity
+        latest_mtm = session.execute(
+            select(AccountMarkToMarketRow)
+            .where(AccountMarkToMarketRow.account_id == acct.id)
+            .order_by(AccountMarkToMarketRow.ts.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        result.append({
+            "id": acct.id,
+            "name": acct.name,
+            "exchange": acct.exchange,
+            "strategy": acct.strategy,
+            "initialCapital": float(acct.initial_capital),
+            "active": acct.active,
+            "createdAt": acct.created_at.isoformat() if acct.created_at else None,
+            "currentEquity": float(latest_mtm.total_equity) if latest_mtm else float(acct.initial_capital),
+            "unrealisedPnl": float(latest_mtm.unrealised_pnl) if latest_mtm else 0,
+            "realisedPnl": float(latest_mtm.realised_pnl) if latest_mtm else 0,
+            "openPositions": latest_mtm.open_positions if latest_mtm else 0,
+        })
+
+    return {"accounts": result}
+
+
+@app.post("/api/accounts", status_code=201)
+async def create_account(req: CreateAccountRequest, session: Session = Depends(get_db)):
+    """Create a new account."""
+    existing = session.execute(
+        select(AccountRow).where(AccountRow.name == req.name)
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Account name {req.name!r} already exists")
+
+    row = AccountRow(
+        name=req.name,
+        exchange=req.exchange,
+        strategy=req.strategy,
+        initial_capital=req.initial_capital,
+        active=True,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return {"id": row.id, "name": row.name}
+
+
+@app.patch("/api/accounts/{account_id}")
+async def patch_account(account_id: int, req: PatchAccountRequest, session: Session = Depends(get_db)):
+    """Toggle active status or rename an account."""
+    acct = session.get(AccountRow, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if req.name is not None:
+        # Check uniqueness
+        conflict = session.execute(
+            select(AccountRow).where(AccountRow.name == req.name, AccountRow.id != account_id)
+        ).scalar_one_or_none()
+        if conflict:
+            raise HTTPException(status_code=409, detail=f"Account name {req.name!r} already exists")
+        acct.name = req.name
+
+    if req.active is not None:
+        acct.active = req.active
+
+    session.commit()
+    return {"id": acct.id, "name": acct.name, "active": acct.active}
+
+
+@app.get("/api/accounts/{account_id}/summary")
+async def get_account_summary(account_id: int, session: Session = Depends(get_db)):
+    """Get account-level metrics and equity."""
+    acct = session.get(AccountRow, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    cache_key = f"account:{account_id}"
+    m = _metrics_cache.get(cache_key)
+    if m is None:
+        m = compute_account_metrics(session, account_id)
+        _metrics_cache.set(cache_key, m)
+
+    latest_mtm = session.execute(
+        select(AccountMarkToMarketRow)
+        .where(AccountMarkToMarketRow.account_id == account_id)
+        .order_by(AccountMarkToMarketRow.ts.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    return {
+        "id": acct.id,
+        "name": acct.name,
+        "exchange": acct.exchange,
+        "strategy": acct.strategy,
+        "initialCapital": float(acct.initial_capital),
+        "currentEquity": float(latest_mtm.total_equity) if latest_mtm else float(acct.initial_capital),
+        "unrealisedPnl": float(latest_mtm.unrealised_pnl) if latest_mtm else 0,
+        "realisedPnl": float(latest_mtm.realised_pnl) if latest_mtm else 0,
+        "openPositions": latest_mtm.open_positions if latest_mtm else 0,
+        "totalTrades": m.total_trades,
+        "winRate": round(m.win_rate, 2),
+        "totalPnl": round(m.total_pnl, 4),
+        "profitFactor": round(m.profit_factor, 2),
+        "sharpeRatio": round(m.sharpe_ratio, 2),
+        "sortinoRatio": round(m.sortino_ratio, 2),
+        "maxDrawdown": round(m.max_drawdown, 2),
+        "expectancy": round(m.expectancy, 2),
+        "avgHoldMinutes": round(m.avg_hold_minutes, 2),
+    }
+
+
+@app.get("/api/accounts/{account_id}/positions")
+async def get_account_positions(
+    account_id: int,
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    session: Session = Depends(get_db),
+):
+    """Get positions for a specific account."""
+    acct = session.get(AccountRow, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    query = select(AccountPositionRow).where(AccountPositionRow.account_id == account_id)
+    if status:
+        query = query.where(AccountPositionRow.status == status)
+
+    total_count = session.execute(
+        select(func.count(AccountPositionRow.id))
+        .where(AccountPositionRow.account_id == account_id)
+    ).scalar()
+
+    positions = session.execute(
+        query.order_by(AccountPositionRow.entry_ts.desc()).limit(limit).offset(offset)
+    ).scalars().all()
+
+    return {
+        "positions": [
+            {
+                "id": p.id,
+                "strategy": p.strategy,
+                "asset": p.asset,
+                "exchange": p.exchange,
+                "direction": p.direction,
+                "entryPrice": float(p.entry_price),
+                "entryTime": p.entry_ts.isoformat(),
+                "quantity": float(p.quantity),
+                "exitPrice": float(p.exit_price) if p.exit_price else None,
+                "exitTime": p.exit_ts.isoformat() if p.exit_ts else None,
+                "exitReason": p.exit_reason,
+                "realisedPnl": float(p.realised_pnl) if p.realised_pnl else None,
+                "status": p.status,
+                "metadata": p.metadata_,
+            }
+            for p in positions
+        ],
+        "total": total_count,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/accounts/{account_id}/equity-curve")
+async def get_account_equity_curve(
+    account_id: int,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    session: Session = Depends(get_db),
+):
+    """Get MTM series for a specific account."""
+    acct = session.get(AccountRow, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    query = select(AccountMarkToMarketRow).where(
+        AccountMarkToMarketRow.account_id == account_id
+    )
+    if start_date:
+        query = query.where(AccountMarkToMarketRow.ts >= start_date)
+    if end_date:
+        query = query.where(AccountMarkToMarketRow.ts <= end_date)
+
+    snapshots = session.execute(
+        query.order_by(AccountMarkToMarketRow.ts)
+    ).scalars().all()
+
+    return {
+        "data": [
+            {
+                "timestamp": s.ts.isoformat(),
+                "totalEquity": float(s.total_equity),
+                "unrealisedPnl": float(s.unrealised_pnl),
+                "realisedPnl": float(s.realised_pnl),
+                "openPositions": s.open_positions,
+            }
+            for s in snapshots
+        ]
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Portfolio CRUD
+# ═══════════════════════════════════════════════════════════════
+
+
+class CreatePortfolioRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+@app.get("/api/portfolios")
+async def list_portfolios(session: Session = Depends(get_db)):
+    """List portfolios with member accounts."""
+    portfolios = session.execute(
+        select(PortfolioGroupRow).order_by(PortfolioGroupRow.id)
+    ).scalars().all()
+
+    result = []
+    for pf in portfolios:
+        members = session.execute(
+            select(PortfolioMemberRow).where(PortfolioMemberRow.portfolio_id == pf.id)
+        ).scalars().all()
+
+        account_ids = [m.account_id for m in members]
+        accounts = []
+        if account_ids:
+            accounts = session.execute(
+                select(AccountRow).where(AccountRow.id.in_(account_ids))
+            ).scalars().all()
+
+        result.append({
+            "id": pf.id,
+            "name": pf.name,
+            "description": pf.description,
+            "createdAt": pf.created_at.isoformat() if pf.created_at else None,
+            "accounts": [
+                {"id": a.id, "name": a.name, "exchange": a.exchange, "strategy": a.strategy}
+                for a in accounts
+            ],
+        })
+
+    return {"portfolios": result}
+
+
+@app.post("/api/portfolios", status_code=201)
+async def create_portfolio(req: CreatePortfolioRequest, session: Session = Depends(get_db)):
+    """Create a new portfolio."""
+    existing = session.execute(
+        select(PortfolioGroupRow).where(PortfolioGroupRow.name == req.name)
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Portfolio name {req.name!r} already exists")
+
+    row = PortfolioGroupRow(
+        name=req.name,
+        description=req.description,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return {"id": row.id, "name": row.name}
+
+
+@app.post("/api/portfolios/{portfolio_id}/accounts/{account_id}", status_code=201)
+async def add_account_to_portfolio(
+    portfolio_id: int,
+    account_id: int,
+    session: Session = Depends(get_db),
+):
+    """Add an account to a portfolio."""
+    pf = session.get(PortfolioGroupRow, portfolio_id)
+    if not pf:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    acct = session.get(AccountRow, account_id)
+    if not acct:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    existing = session.execute(
+        select(PortfolioMemberRow).where(
+            PortfolioMemberRow.portfolio_id == portfolio_id,
+            PortfolioMemberRow.account_id == account_id,
+        )
+    ).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status_code=409, detail="Account already in portfolio")
+
+    member = PortfolioMemberRow(portfolio_id=portfolio_id, account_id=account_id)
+    session.add(member)
+    session.commit()
+    return {"portfolioId": portfolio_id, "accountId": account_id}
+
+
+@app.delete("/api/portfolios/{portfolio_id}/accounts/{account_id}")
+async def remove_account_from_portfolio(
+    portfolio_id: int,
+    account_id: int,
+    session: Session = Depends(get_db),
+):
+    """Remove an account from a portfolio."""
+    member = session.execute(
+        select(PortfolioMemberRow).where(
+            PortfolioMemberRow.portfolio_id == portfolio_id,
+            PortfolioMemberRow.account_id == account_id,
+        )
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Membership not found")
+
+    session.delete(member)
+    session.commit()
+    return {"ok": True}
+
+
+@app.get("/api/portfolios/{portfolio_id}/summary")
+async def get_portfolio_group_summary(portfolio_id: int, session: Session = Depends(get_db)):
+    """Aggregated metrics for a portfolio group."""
+    pf = session.get(PortfolioGroupRow, portfolio_id)
+    if not pf:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    cache_key = f"portfolio_group:{portfolio_id}"
+    m = _metrics_cache.get(cache_key)
+    if m is None:
+        m = compute_portfolio_group_metrics(session, portfolio_id)
+        _metrics_cache.set(cache_key, m)
+
+    # Aggregate equity from member accounts
+    members = session.execute(
+        select(PortfolioMemberRow.account_id).where(PortfolioMemberRow.portfolio_id == portfolio_id)
+    ).scalars().all()
+
+    total_equity = 0.0
+    total_unrealised = 0.0
+    total_realised = 0.0
+    total_open = 0
+    for aid in members:
+        latest_mtm = session.execute(
+            select(AccountMarkToMarketRow)
+            .where(AccountMarkToMarketRow.account_id == aid)
+            .order_by(AccountMarkToMarketRow.ts.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest_mtm:
+            total_equity += float(latest_mtm.total_equity)
+            total_unrealised += float(latest_mtm.unrealised_pnl)
+            total_realised += float(latest_mtm.realised_pnl)
+            total_open += latest_mtm.open_positions
+        else:
+            acct = session.get(AccountRow, aid)
+            total_equity += float(acct.initial_capital) if acct else 0
+
+    return {
+        "id": pf.id,
+        "name": pf.name,
+        "totalEquity": round(total_equity, 4),
+        "unrealisedPnl": round(total_unrealised, 4),
+        "realisedPnl": round(total_realised, 4),
+        "openPositions": total_open,
+        "totalTrades": m.total_trades,
+        "winRate": round(m.win_rate, 2),
+        "totalPnl": round(m.total_pnl, 4),
+        "profitFactor": round(m.profit_factor, 2),
+        "sharpeRatio": round(m.sharpe_ratio, 2),
+        "sortinoRatio": round(m.sortino_ratio, 2),
+        "maxDrawdown": round(m.max_drawdown, 2),
+        "expectancy": round(m.expectancy, 2),
+        "avgHoldMinutes": round(m.avg_hold_minutes, 2),
+    }
+
+
+@app.get("/api/portfolios/{portfolio_id}/equity-curve")
+async def get_portfolio_group_equity_curve(
+    portfolio_id: int,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    session: Session = Depends(get_db),
+):
+    """Aggregated MTM for a portfolio group."""
+    pf = session.get(PortfolioGroupRow, portfolio_id)
+    if not pf:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+
+    members = session.execute(
+        select(PortfolioMemberRow.account_id).where(PortfolioMemberRow.portfolio_id == portfolio_id)
+    ).scalars().all()
+
+    if not members:
+        return {"data": []}
+
+    query = select(AccountMarkToMarketRow).where(
+        AccountMarkToMarketRow.account_id.in_(members)
+    )
+    if start_date:
+        query = query.where(AccountMarkToMarketRow.ts >= start_date)
+    if end_date:
+        query = query.where(AccountMarkToMarketRow.ts <= end_date)
+
+    snapshots = session.execute(
+        query.order_by(AccountMarkToMarketRow.ts)
+    ).scalars().all()
+
+    # Aggregate by timestamp
+    by_ts: dict[str, dict] = {}
+    for s in snapshots:
+        ts_key = s.ts.isoformat()
+        if ts_key not in by_ts:
+            by_ts[ts_key] = {
+                "timestamp": ts_key,
+                "totalEquity": 0.0,
+                "unrealisedPnl": 0.0,
+                "realisedPnl": 0.0,
+                "openPositions": 0,
+            }
+        by_ts[ts_key]["totalEquity"] += float(s.total_equity)
+        by_ts[ts_key]["unrealisedPnl"] += float(s.unrealised_pnl)
+        by_ts[ts_key]["realisedPnl"] += float(s.realised_pnl)
+        by_ts[ts_key]["openPositions"] += s.open_positions
+
+    return {"data": list(by_ts.values())}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Strategy endpoints (updated to query new schema)
+# ═══════════════════════════════════════════════════════════════
+
+
 @app.get("/api/strategies")
 async def list_strategies(session: Session = Depends(get_db)):
     """List all registered strategies with current performance metrics."""
     strategies = []
 
-    # Start from registry so every strategy is surfaced, even those with no trades yet.
-    # Union with DB names to catch any legacy strategies that ran but aren't registered.
+    # Union registry names with DB names to catch legacy strategies
     db_names = set(session.execute(
-        select(distinct(PositionRow.strategy))
+        select(distinct(AccountPositionRow.strategy))
     ).scalars().all())
     strategy_names = sorted(set(STRATEGY_REGISTRY) | db_names)
 
@@ -181,20 +650,18 @@ async def get_strategy_trades(
     session: Session = Depends(get_db)
 ):
     """Get paginated trade history for a specific strategy."""
-    query = select(PositionRow).where(PositionRow.strategy == strategy_name)
+    query = select(AccountPositionRow).where(AccountPositionRow.strategy == strategy_name)
 
     if status:
-        query = query.where(PositionRow.status == status)
+        query = query.where(AccountPositionRow.status == status)
 
-    # Get total count
     total_count = session.execute(
-        select(func.count(PositionRow.id))
-        .where(PositionRow.strategy == strategy_name)
+        select(func.count(AccountPositionRow.id))
+        .where(AccountPositionRow.strategy == strategy_name)
     ).scalar()
 
-    # Get paginated results
     positions = session.execute(
-        query.order_by(PositionRow.entry_ts.desc())
+        query.order_by(AccountPositionRow.entry_ts.desc())
         .limit(limit)
         .offset(offset)
     ).scalars().all()
@@ -203,6 +670,7 @@ async def get_strategy_trades(
         "trades": [
             {
                 "id": p.id,
+                "accountId": p.account_id,
                 "asset": p.asset,
                 "exchange": p.exchange,
                 "direction": p.direction,
@@ -241,6 +709,11 @@ async def get_strategy_docs(strategy_name: str):
     }
 
 
+# ═══════════════════════════════════════════════════════════════
+# Legacy-compatible endpoints (query new schema, backward-compat response)
+# ═══════════════════════════════════════════════════════════════
+
+
 @app.get("/api/equity-curve")
 async def get_equity_curve(
     strategy: Optional[str] = None,
@@ -250,19 +723,55 @@ async def get_equity_curve(
     interval: str = "1h",
     session: Session = Depends(get_db)
 ):
-    """Get time-series equity data for charting."""
-    # Get the default portfolio
+    """Get time-series equity data for charting.
+
+    Aggregates across all accounts for backward compatibility.
+    """
+    # Try new schema first — aggregate all account MTM
+    all_accounts = session.execute(select(AccountRow.id)).scalars().all()
+    if all_accounts:
+        query = select(AccountMarkToMarketRow).where(
+            AccountMarkToMarketRow.account_id.in_(all_accounts)
+        )
+        if start_date:
+            query = query.where(AccountMarkToMarketRow.ts >= start_date)
+        if end_date:
+            query = query.where(AccountMarkToMarketRow.ts <= end_date)
+
+        snapshots = session.execute(
+            query.order_by(AccountMarkToMarketRow.ts)
+        ).scalars().all()
+
+        # Aggregate by timestamp
+        by_ts: dict[str, dict] = {}
+        for s in snapshots:
+            ts_key = s.ts.isoformat()
+            if ts_key not in by_ts:
+                by_ts[ts_key] = {
+                    "timestamp": ts_key,
+                    "totalEquity": 0.0,
+                    "unrealisedPnl": 0.0,
+                    "realisedPnl": 0.0,
+                    "openPositions": 0,
+                }
+            by_ts[ts_key]["totalEquity"] += float(s.total_equity)
+            by_ts[ts_key]["unrealisedPnl"] += float(s.unrealised_pnl)
+            by_ts[ts_key]["realisedPnl"] += float(s.realised_pnl)
+            by_ts[ts_key]["openPositions"] += s.open_positions
+
+        return {"data": list(by_ts.values())}
+
+    # Fall back to old schema
     portfolio = session.execute(
         select(PortfolioRow).where(PortfolioRow.name == "default")
     ).scalar_one_or_none()
 
     if not portfolio:
-        raise HTTPException(status_code=404, detail="Portfolio not found")
+        return {"data": []}
 
     query = select(MarkToMarketRow).where(
         MarkToMarketRow.portfolio_id == portfolio.id
     )
-
     if start_date:
         query = query.where(MarkToMarketRow.ts >= start_date)
     if end_date:
@@ -272,49 +781,33 @@ async def get_equity_curve(
         query.order_by(MarkToMarketRow.ts)
     ).scalars().all()
 
-    # Process snapshots based on filters
-    equity_data = []
-    for snapshot in snapshots:
-        data_point = {
-            "timestamp": snapshot.ts.isoformat(),
-            "totalEquity": float(snapshot.total_equity),
-            "unrealisedPnl": float(snapshot.unrealised_pnl),
-            "realisedPnl": float(snapshot.realised_pnl),
-            "openPositions": snapshot.open_positions
-        }
-
-        # If filtering by strategy or asset, extract from breakdown
-        if (strategy or asset) and snapshot.breakdown:
-            filtered_equity = Decimal("0")
-
-            if strategy and "by_strategy" in snapshot.breakdown:
-                strategy_data = snapshot.breakdown["by_strategy"].get(strategy, {})
-                filtered_equity = Decimal(str(strategy_data.get("total_pnl", 0)))
-            elif asset and "by_asset" in snapshot.breakdown:
-                asset_data = snapshot.breakdown["by_asset"].get(asset, {})
-                filtered_equity = Decimal(str(asset_data.get("total_pnl", 0)))
-
-            data_point["filteredEquity"] = float(filtered_equity)
-
-        equity_data.append(data_point)
-
-    return {"data": equity_data}
+    return {
+        "data": [
+            {
+                "timestamp": s.ts.isoformat(),
+                "totalEquity": float(s.total_equity),
+                "unrealisedPnl": float(s.unrealised_pnl),
+                "realisedPnl": float(s.realised_pnl),
+                "openPositions": s.open_positions,
+            }
+            for s in snapshots
+        ]
+    }
 
 
 @app.get("/api/positions/open")
 async def get_open_positions(session: Session = Depends(get_db)):
     """Get currently open positions with unrealized P&L."""
     positions = session.execute(
-        select(PositionRow)
-        .where(PositionRow.status == "OPEN")
-        .order_by(PositionRow.entry_ts.desc())
+        select(AccountPositionRow)
+        .where(AccountPositionRow.status == "OPEN")
+        .order_by(AccountPositionRow.entry_ts.desc())
     ).scalars().all()
 
     # Get current prices for each asset
     current_prices = {}
     for position in positions:
         if position.asset not in current_prices:
-            # Get latest candle for this asset
             latest_candle = session.execute(
                 select(CandleRow)
                 .where(
@@ -331,7 +824,6 @@ async def get_open_positions(session: Session = Depends(get_db)):
             if latest_candle:
                 current_prices[position.asset] = latest_candle.close
 
-    # Calculate unrealized P&L
     open_positions = []
     for position in positions:
         current_price = current_prices.get(position.asset)
@@ -339,13 +831,14 @@ async def get_open_positions(session: Session = Depends(get_db)):
         if current_price:
             if position.direction == "LONG":
                 unrealised_pnl = (current_price - position.entry_price) * position.quantity
-            else:  # SHORT
+            else:
                 unrealised_pnl = (position.entry_price - current_price) * position.quantity
         else:
             unrealised_pnl = Decimal("0")
 
         open_positions.append({
             "id": position.id,
+            "accountId": position.account_id,
             "strategy": position.strategy,
             "asset": position.asset,
             "exchange": position.exchange,
@@ -364,18 +857,16 @@ async def get_open_positions(session: Session = Depends(get_db)):
 @app.get("/api/assets/{asset}/performance")
 async def get_asset_performance(asset: str, session: Session = Depends(get_db)):
     """Get per-asset P&L across all strategies."""
-    # Get all closed positions for this asset
     positions = session.execute(
-        select(PositionRow)
+        select(AccountPositionRow)
         .where(
             and_(
-                PositionRow.asset == asset,
-                PositionRow.status == "CLOSED"
+                AccountPositionRow.asset == asset,
+                AccountPositionRow.status == "CLOSED"
             )
         )
     ).scalars().all()
 
-    # Group by strategy
     by_strategy = {}
     for position in positions:
         if position.strategy not in by_strategy:
@@ -398,7 +889,6 @@ async def get_asset_performance(asset: str, session: Session = Depends(get_db)):
             hold_time = position.exit_ts - position.entry_ts
             strategy_data["avgHoldTime"] += hold_time
 
-    # Calculate averages
     performance = {
         "asset": asset,
         "totalTrades": len(positions),
@@ -424,7 +914,98 @@ async def get_asset_performance(asset: str, session: Session = Depends(get_db)):
 
 @app.get("/api/summary")
 async def get_portfolio_summary(session: Session = Depends(get_db)):
-    """Get portfolio-level metrics."""
+    """Get portfolio-level metrics (backward-compat: aggregates all accounts)."""
+    # Try new schema first
+    all_accounts = session.execute(
+        select(AccountRow).where(AccountRow.active == True)  # noqa: E712
+    ).scalars().all()
+
+    if all_accounts:
+        # Find or create a default portfolio group for aggregation
+        default_pf = session.execute(
+            select(PortfolioGroupRow).where(PortfolioGroupRow.name == "default")
+        ).scalar_one_or_none()
+
+        total_equity = 0.0
+        total_unrealised = 0.0
+        total_realised = 0.0
+        total_open = 0
+        latest_ts = None
+
+        for acct in all_accounts:
+            latest_mtm = session.execute(
+                select(AccountMarkToMarketRow)
+                .where(AccountMarkToMarketRow.account_id == acct.id)
+                .order_by(AccountMarkToMarketRow.ts.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if latest_mtm:
+                total_equity += float(latest_mtm.total_equity)
+                total_unrealised += float(latest_mtm.unrealised_pnl)
+                total_realised += float(latest_mtm.realised_pnl)
+                total_open += latest_mtm.open_positions
+                if latest_ts is None or latest_mtm.ts > latest_ts:
+                    latest_ts = latest_mtm.ts
+            else:
+                total_equity += float(acct.initial_capital)
+
+        # Compute metrics from portfolio group if available, else from all positions
+        if default_pf:
+            cache_key = f"portfolio_group:{default_pf.id}"
+            m = _metrics_cache.get(cache_key)
+            if m is None:
+                m = compute_portfolio_group_metrics(session, default_pf.id)
+                _metrics_cache.set(cache_key, m)
+        else:
+            # No portfolio group — use a dummy StrategyMetrics
+            from trading_core.metrics.formulas import StrategyMetrics
+            m = StrategyMetrics()
+
+        # Daily P&L
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        daily_pnl = 0.0
+        for acct in all_accounts:
+            today_first = session.execute(
+                select(AccountMarkToMarketRow)
+                .where(
+                    and_(
+                        AccountMarkToMarketRow.account_id == acct.id,
+                        AccountMarkToMarketRow.ts >= today_start,
+                    )
+                )
+                .order_by(AccountMarkToMarketRow.ts)
+                .limit(1)
+            ).scalar_one_or_none()
+            today_last = session.execute(
+                select(AccountMarkToMarketRow)
+                .where(
+                    and_(
+                        AccountMarkToMarketRow.account_id == acct.id,
+                        AccountMarkToMarketRow.ts >= today_start,
+                    )
+                )
+                .order_by(AccountMarkToMarketRow.ts.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if today_first and today_last:
+                daily_pnl += float(today_last.total_equity - today_first.total_equity)
+
+        return {
+            "totalEquity": round(total_equity, 4),
+            "unrealisedPnl": round(total_unrealised, 4),
+            "realisedPnl": round(total_realised, 4),
+            "openPositions": total_open,
+            "dailyPnl": round(daily_pnl, 4),
+            "sharpeRatio": round(m.sharpe_ratio, 2),
+            "sortinoRatio": round(m.sortino_ratio, 2),
+            "maxDrawdown": round(m.max_drawdown, 2),
+            "expectancy": round(m.expectancy, 2),
+            "avgHoldMinutes": round(m.avg_hold_minutes, 2),
+            "profitFactor": round(m.profit_factor, 2),
+            "lastUpdate": latest_ts.isoformat() if latest_ts else None,
+        }
+
+    # Fall back to old schema
     portfolio = session.execute(
         select(PortfolioRow).where(PortfolioRow.name == "default")
     ).scalar_one_or_none()
@@ -432,7 +1013,6 @@ async def get_portfolio_summary(session: Session = Depends(get_db)):
     if not portfolio:
         raise HTTPException(status_code=404, detail="Portfolio not found")
 
-    # Get latest mark-to-market
     latest_mtm = session.execute(
         select(MarkToMarketRow)
         .where(MarkToMarketRow.portfolio_id == portfolio.id)
@@ -455,7 +1035,6 @@ async def get_portfolio_summary(session: Session = Depends(get_db)):
             "profitFactor": 0,
         }
 
-    # Check cache
     cache_key = f"portfolio:{portfolio.id}"
     cached_metrics = _metrics_cache.get(cache_key)
     if cached_metrics is None:
@@ -464,7 +1043,6 @@ async def get_portfolio_summary(session: Session = Depends(get_db)):
 
     m = cached_metrics
 
-    # Get current day's P&L (not part of metrics module — depends on wall clock)
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     today_start_mtm = session.execute(
         select(MarkToMarketRow)

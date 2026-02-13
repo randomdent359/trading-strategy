@@ -12,6 +12,8 @@ from trading_core.metrics.formulas import (
     win_rate,
 )
 from trading_core.metrics.queries import (
+    compute_account_metrics,
+    compute_portfolio_group_metrics,
     compute_portfolio_metrics,
     compute_strategy_metrics,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "MetricsCache",
     "StrategyMetrics",
     "avg_hold_time_minutes",
+    "compute_account_metrics",
+    "compute_portfolio_group_metrics",
     "compute_portfolio_metrics",
     "compute_strategy_metrics",
     "expectancy",

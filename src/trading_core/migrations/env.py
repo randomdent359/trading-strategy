@@ -20,7 +20,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-MANAGED_SCHEMAS = {"trading_market_data", "trading_signals", "trading_paper"}
+MANAGED_SCHEMAS = {"trading_market_data", "trading_signals", "trading_paper", "trading_accounts"}
 
 
 def get_url() -> str:
@@ -36,7 +36,7 @@ def get_url() -> str:
 
 
 def include_object(obj, name, type_, reflected, compare_to):
-    """Only manage objects in our 3 schemas."""
+    """Only manage objects in our schemas."""
     if type_ == "table":
         return obj.schema in MANAGED_SCHEMAS
     return True

@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 if TYPE_CHECKING:
     from trading_core.paper.oracle import PriceOracle
 
 from trading_core.config.schema import PaperConfig
-from trading_core.db.tables.paper import MarkToMarketRow, PortfolioRow, PositionRow
+from trading_core.db.tables.accounts import AccountMarkToMarketRow, AccountPositionRow, AccountRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.pricing import get_latest_price
 from trading_core.paper.risk import RiskTracker, RiskVerdict, evaluate_risk
@@ -32,16 +33,20 @@ log = structlog.get_logger("paper_engine")
 
 
 class PaperEngine:
-    """Manages paper trading positions driven by strategy signals."""
+    """Manages paper trading positions driven by strategy signals, scoped to one account."""
 
     def __init__(
         self,
         config: PaperConfig,
-        portfolio_id: int,
+        account_id: int,
+        account_exchange: str,
+        account_strategy: str,
         oracle: "PriceOracle | None" = None,
     ) -> None:
         self.config = config
-        self.portfolio_id = portfolio_id
+        self.account_id = account_id
+        self.account_exchange = account_exchange
+        self.account_strategy = account_strategy
         self.risk_tracker = RiskTracker(config)
         self.oracle = oracle
 
@@ -60,43 +65,55 @@ class PaperEngine:
                 return price
         return get_latest_price(session, asset, exchange)
 
-    # ── Portfolio ──────────────────────────────────────────────
+    # ── Account ──────────────────────────────────────────────
 
     @staticmethod
-    def ensure_portfolio(session: Session, name: str = "default", initial_capital: float = 10000) -> int:
-        """Upsert the named portfolio and return its ID."""
-        row = session.query(PortfolioRow).filter(PortfolioRow.name == name).first()
+    def ensure_account(
+        session: Session,
+        name: str,
+        exchange: str,
+        strategy: str,
+        initial_capital: float = 10000,
+    ) -> int:
+        """Upsert the named account and return its ID."""
+        row = session.query(AccountRow).filter(AccountRow.name == name).first()
         if row is not None:
             return row.id
-        row = PortfolioRow(
+        row = AccountRow(
             name=name,
+            exchange=exchange,
+            strategy=strategy,
             initial_capital=initial_capital,
+            active=True,
             created_at=datetime.now(timezone.utc),
         )
         session.add(row)
         session.commit()
         session.refresh(row)
-        log.info("portfolio_ensured", portfolio_id=row.id, name=name)
+        log.info("account_ensured", account_id=row.id, name=name,
+                 exchange=exchange, strategy=strategy)
         return row.id
 
     # ── Signal consumption ────────────────────────────────────
 
     def consume_signals(self, session: Session) -> list[SignalRow]:
-        """Fetch unacted Hyperliquid signals, mark them acted_on, return the list.
+        """Fetch unacted signals matching this account's exchange and strategy.
 
         Only Hyperliquid signals are consumed — Polymarket signals are
         informational (probability-based prices break position sizing).
         """
         query = session.query(SignalRow).filter(
             SignalRow.acted_on == False,  # noqa: E712
-            SignalRow.exchange == "hyperliquid",
+            SignalRow.exchange == self.account_exchange,
+            SignalRow.strategy == self.account_strategy,
         )
         rows = query.order_by(SignalRow.ts).all()
         for row in rows:
             row.acted_on = True
         if rows:
             session.commit()
-            log.info("signals_consumed", count=len(rows))
+            log.info("signals_consumed", count=len(rows),
+                     account_id=self.account_id, strategy=self.account_strategy)
         return rows
 
     # ── Risk gate ───────────────────────────────────────────────
@@ -110,10 +127,10 @@ class PaperEngine:
     ) -> RiskVerdict:
         """Evaluate all risk controls for a prospective signal."""
         open_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "OPEN",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "OPEN",
             )
             .all()
         )
@@ -154,7 +171,7 @@ class PaperEngine:
         session: Session,
         signal: SignalRow,
         current_equity: Decimal,
-    ) -> PositionRow | None:
+    ) -> AccountPositionRow | None:
         """Open a new position from a signal. Returns None if no price available."""
         price = self._get_price(session, signal.asset, signal.exchange)
         if price is None:
@@ -187,8 +204,8 @@ class PaperEngine:
             return None
 
         now = datetime.now(timezone.utc)
-        position = PositionRow(
-            portfolio_id=self.portfolio_id,
+        position = AccountPositionRow(
+            account_id=self.account_id,
             strategy=signal.strategy,
             asset=signal.asset,
             exchange=signal.exchange,
@@ -210,6 +227,7 @@ class PaperEngine:
         log.info(
             "position_opened",
             position_id=position.id,
+            account_id=self.account_id,
             strategy=signal.strategy,
             asset=signal.asset,
             direction=signal.direction,
@@ -220,18 +238,18 @@ class PaperEngine:
         )
         return position
 
-    def check_exits(self, session: Session, now: datetime) -> list[PositionRow]:
+    def check_exits(self, session: Session, now: datetime) -> list[AccountPositionRow]:
         """Check all open positions for stop-loss, take-profit, or timeout exits."""
         open_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "OPEN",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "OPEN",
             )
             .all()
         )
 
-        closed: list[PositionRow] = []
+        closed: list[AccountPositionRow] = []
         timeout_delta = timedelta(minutes=self.config.default_timeout_minutes)
 
         for pos in open_positions:
@@ -267,7 +285,7 @@ class PaperEngine:
     def close_position(
         self,
         session: Session,
-        position: PositionRow,
+        position: AccountPositionRow,
         exit_price: Decimal,
         exit_reason: str,
     ) -> None:
@@ -301,6 +319,7 @@ class PaperEngine:
         position.metadata_["exit_slippage_pct"] = slippage_pct
         position.metadata_["fees"] = float(fees)
         position.metadata_["gross_pnl"] = float(gross_pnl)
+        flag_modified(position, "metadata_")
 
         session.commit()
 
@@ -309,6 +328,7 @@ class PaperEngine:
         log.info(
             "position_closed",
             position_id=position.id,
+            account_id=self.account_id,
             strategy=position.strategy,
             asset=position.asset,
             direction=position.direction,
@@ -324,15 +344,15 @@ class PaperEngine:
 
     def get_current_equity(self, session: Session) -> Decimal:
         """Calculate current equity: initial_capital + realised P&L + unrealised P&L."""
-        portfolio = session.get(PortfolioRow, self.portfolio_id)
-        initial = Decimal(str(portfolio.initial_capital))
+        account = session.get(AccountRow, self.account_id)
+        initial = Decimal(str(account.initial_capital))
 
         # Sum realised P&L from closed positions
         closed_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "CLOSED",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "CLOSED",
             )
             .all()
         )
@@ -343,10 +363,10 @@ class PaperEngine:
 
         # Sum unrealised P&L from open positions
         open_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "OPEN",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "OPEN",
             )
             .all()
         )
@@ -380,15 +400,15 @@ class PaperEngine:
     # ── Mark-to-market ────────────────────────────────────────
 
     def write_mark_to_market(self, session: Session, now: datetime) -> None:
-        """Snapshot current equity and write a MarkToMarketRow."""
-        portfolio = session.get(PortfolioRow, self.portfolio_id)
-        initial = Decimal(str(portfolio.initial_capital))
+        """Snapshot current equity and write an AccountMarkToMarketRow."""
+        account = session.get(AccountRow, self.account_id)
+        initial = Decimal(str(account.initial_capital))
 
         closed_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "CLOSED",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "CLOSED",
             )
             .all()
         )
@@ -398,10 +418,10 @@ class PaperEngine:
         )
 
         open_positions = (
-            session.query(PositionRow)
+            session.query(AccountPositionRow)
             .filter(
-                PositionRow.portfolio_id == self.portfolio_id,
-                PositionRow.status == "OPEN",
+                AccountPositionRow.account_id == self.account_id,
+                AccountPositionRow.status == "OPEN",
             )
             .all()
         )
@@ -453,8 +473,8 @@ class PaperEngine:
 
         total_equity = initial + realised + unrealised
 
-        mtm = MarkToMarketRow(
-            portfolio_id=self.portfolio_id,
+        mtm = AccountMarkToMarketRow(
+            account_id=self.account_id,
             ts=now,
             total_equity=float(total_equity),
             unrealised_pnl=float(unrealised),
@@ -467,6 +487,7 @@ class PaperEngine:
 
         log.info(
             "mtm_written",
+            account_id=self.account_id,
             total_equity=float(total_equity),
             unrealised_pnl=float(unrealised),
             realised_pnl=float(realised),

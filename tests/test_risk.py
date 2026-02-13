@@ -6,14 +6,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import BigInteger, Integer, JSON, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Session
 
 from trading_core.config.schema import PaperConfig
-from trading_core.db.base import Base
 from trading_core.db.tables.market_data import CandleRow
-from trading_core.db.tables.paper import PortfolioRow, PositionRow
+from trading_core.db.tables.accounts import AccountPositionRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.engine import PaperEngine
 from trading_core.paper.risk import (
@@ -44,32 +40,9 @@ DEFAULT_CONFIG = PaperConfig(
     cooldown_after_loss_minutes=5,
     kelly_enabled=False,
     kelly_safety_factor=0.5,
+    slippage_pct={"hyperliquid": 0.0, "polymarket": 0.0},
+    fee_pct={"hyperliquid": 0.0, "polymarket": 0.0},
 )
-
-
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session with all schemas/tables created."""
-    engine = create_engine("sqlite:///:memory:")
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, _rec):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    for table in Base.metadata.tables.values():
-        table.schema = None
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                col.type = JSON()
-            if isinstance(col.type, BigInteger):
-                col.type = Integer()
-
-    Base.metadata.create_all(engine)
-
-    session = Session(engine)
-    yield session
-    session.close()
-    engine.dispose()
 
 
 # ── Helpers ───────────────────────────────────────────────────
@@ -120,14 +93,17 @@ def _seed_signal(
 
 def _make_engine(session, config=None, initial_capital=10000):
     cfg = config or DEFAULT_CONFIG
-    pid = PaperEngine.ensure_portfolio(session, name="default", initial_capital=initial_capital)
-    return PaperEngine(cfg, pid), pid
+    aid = PaperEngine.ensure_account(
+        session, name="default", exchange="hyperliquid",
+        strategy="funding_rate", initial_capital=initial_capital,
+    )
+    return PaperEngine(cfg, aid, "hyperliquid", "funding_rate"), aid
 
 
-def _open_position_directly(session, portfolio_id, strategy="funding_rate", asset="BTC",
+def _open_position_directly(session, account_id, strategy="funding_rate", asset="BTC",
                             direction="LONG", entry_price=60000, quantity=0.1667):
-    pos = PositionRow(
-        portfolio_id=portfolio_id,
+    pos = AccountPositionRow(
+        account_id=account_id,
         strategy=strategy,
         asset=asset,
         exchange="hyperliquid",
@@ -149,18 +125,14 @@ def _open_position_directly(session, portfolio_id, strategy="funding_rate", asse
 
 class TestKellyFraction:
     def test_high_confidence_capped(self):
-        # confidence=0.8, SL=2%, TP=4% → b=2, kelly=(0.8*2-0.2)/2=0.7, half=0.35
-        # But this is the raw fraction — capping happens in calculate_adjusted_risk_pct
         result = calculate_kelly_fraction(0.8, 0.02, 0.04, safety_factor=0.5)
         assert result == pytest.approx(0.35, rel=1e-3)
 
     def test_low_confidence_reduced(self):
-        # confidence=0.35, b=2, kelly=(0.35*2-0.65)/2=0.025, half=0.0125
         result = calculate_kelly_fraction(0.35, 0.02, 0.04, safety_factor=0.5)
         assert result == pytest.approx(0.0125, rel=1e-3)
 
     def test_no_edge_returns_zero(self):
-        # confidence=0.25, b=2, kelly=(0.25*2-0.75)/2=-0.125 → 0.0
         result = calculate_kelly_fraction(0.25, 0.02, 0.04, safety_factor=0.5)
         assert result == 0.0
 
@@ -174,12 +146,10 @@ class TestKellyFraction:
         assert result == 0.0
 
     def test_zero_take_profit_returns_zero(self):
-        # b=0 → returns 0.0
         result = calculate_kelly_fraction(0.8, 0.02, 0.0, safety_factor=0.5)
         assert result == 0.0
 
     def test_breakeven_confidence(self):
-        # confidence=1/3 with b=2 → kelly=(1/3*2 - 2/3)/2 = 0 → 0.0
         result = calculate_kelly_fraction(1/3, 0.02, 0.04, safety_factor=0.5)
         assert result == pytest.approx(0.0, abs=1e-10)
 
@@ -195,18 +165,15 @@ class TestConfidenceToWinProb:
         assert confidence_to_win_prob(1.0, 0.5) == 1.0
 
     def test_mid_confidence(self):
-        # 0.5 + 0.5 * 0.5 = 0.75
         assert confidence_to_win_prob(0.5, 0.5) == 0.75
 
     def test_linearity(self):
-        # p should scale linearly between base_rate and 1.0
         p1 = confidence_to_win_prob(0.2, 0.5)
         p2 = confidence_to_win_prob(0.4, 0.5)
         p3 = confidence_to_win_prob(0.6, 0.5)
         assert p2 - p1 == pytest.approx(p3 - p2, rel=1e-6)
 
     def test_custom_base_rate(self):
-        # base_rate=0.4, confidence=0.5 → 0.4 + 0.5*0.6 = 0.7
         assert confidence_to_win_prob(0.5, 0.4) == pytest.approx(0.7)
 
 
@@ -225,19 +192,16 @@ class TestCalculateKellyAllocation:
         assert result == 0.0
 
     def test_kelly_zero_confidence_has_edge(self):
-        # confidence=0 → win_prob=0.5, b=2, kelly=(0.5*2-0.5)/2=0.25, half=0.125
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
         result = calculate_kelly_allocation(0.0, config)
         assert result == pytest.approx(0.125, rel=1e-3)
 
     def test_kelly_mid_confidence(self):
-        # confidence=0.3 → win_prob=0.65, b=2, kelly=(0.65*2-0.35)/2=0.475, half=0.2375
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
         result = calculate_kelly_allocation(0.3, config)
         assert result == pytest.approx(0.2375, rel=1e-3)
 
     def test_kelly_high_confidence(self):
-        # confidence=1.0 → win_prob=1.0, b=2, kelly=(1.0*2-0.0)/2=1.0, half=0.5
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
         result = calculate_kelly_allocation(1.0, config)
         assert result == pytest.approx(0.5, rel=1e-3)
@@ -246,7 +210,6 @@ class TestCalculateKellyAllocation:
         config = DEFAULT_CONFIG.model_copy(update={
             "kelly_enabled": True, "kelly_base_win_prob": 0.4,
         })
-        # confidence=0 → win_prob=0.4, b=2, kelly=(0.4*2-0.6)/2=0.1, half=0.05
         result = calculate_kelly_allocation(0.0, config)
         assert result == pytest.approx(0.05, rel=1e-3)
 
@@ -256,22 +219,15 @@ class TestCalculateKellyAllocation:
 
 class TestCalculatePositionSizeKelly:
     def test_basic_sizing(self):
-        # equity=10000, kelly_alloc=0.125, notional=1250, entry=100000
-        # max_notional = (10000*0.02)/0.02 = 10000
-        # qty = 1250/100000 = 0.0125
         qty = calculate_position_size_kelly(
             Decimal("100000"), Decimal("10000"), 0.125, 0.02, 0.02,
         )
         assert float(qty) == pytest.approx(0.0125, rel=1e-6)
 
     def test_risk_cap_binding(self):
-        # equity=10000, kelly_alloc=0.8, notional=8000, entry=100000
-        # max_notional = (10000*0.02)/0.02 = 10000 → not binding
-        # But with risk_pct=0.01: max_notional = (10000*0.01)/0.02 = 5000 → binding
         qty = calculate_position_size_kelly(
             Decimal("100000"), Decimal("10000"), 0.8, 0.01, 0.02,
         )
-        # min(8000, 5000) = 5000, qty = 5000/100000 = 0.05
         assert float(qty) == pytest.approx(0.05, rel=1e-6)
 
     def test_zero_allocation_returns_zero(self):
@@ -292,26 +248,26 @@ class TestCalculatePositionSizeKelly:
 
 class TestCheckMaxPositionsPerStrategy:
     def test_below_limit(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, strategy="funding_rate")
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, strategy="funding_rate")
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_positions_per_strategy("funding_rate", positions, 3)
         assert verdict.allowed is True
 
     def test_at_limit(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         for _ in range(3):
-            _open_position_directly(db_session, pid, strategy="funding_rate")
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
+            _open_position_directly(db_session, aid, strategy="funding_rate")
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_positions_per_strategy("funding_rate", positions, 3)
         assert verdict.allowed is False
         assert "max_positions_per_strategy" in verdict.reason
 
     def test_different_strategy_not_counted(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         for _ in range(3):
-            _open_position_directly(db_session, pid, strategy="funding_rate")
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
+            _open_position_directly(db_session, aid, strategy="funding_rate")
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_positions_per_strategy("rsi_mean_reversion", positions, 3)
         assert verdict.allowed is True
 
@@ -321,29 +277,24 @@ class TestCheckMaxPositionsPerStrategy:
 
 class TestCheckMaxTotalExposure:
     def test_below_limit(self, db_session):
-        engine, pid = _make_engine(db_session)
-        # One position: 60000 * 0.1 = 6000 notional, equity=10000, limit=50%=5000
-        # But let's use small positions to stay under
-        _open_position_directly(db_session, pid, entry_price=1000, quantity=1)
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
-        # Current exposure: 1000. Adding 1000. Total: 2000 < 5000
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, entry_price=1000, quantity=1)
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_total_exposure(positions, Decimal("10000"), Decimal("1000"), 0.50)
         assert verdict.allowed is True
 
     def test_above_limit(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, entry_price=3000, quantity=1)
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
-        # Current exposure: 3000. Adding 3000. Total: 6000 > 5000
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, entry_price=3000, quantity=1)
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_total_exposure(positions, Decimal("10000"), Decimal("3000"), 0.50)
         assert verdict.allowed is False
         assert "max_total_exposure" in verdict.reason
 
     def test_boundary_exactly_at_limit(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, entry_price=2000, quantity=1)
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
-        # Current: 2000. Adding 3000. Total: 5000 == limit 5000. Not exceeded.
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, entry_price=2000, quantity=1)
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         verdict = check_max_total_exposure(positions, Decimal("10000"), Decimal("3000"), 0.50)
         assert verdict.allowed is True
 
@@ -364,12 +315,10 @@ class TestRiskTracker:
     def test_cooldown_expires(self):
         tracker = RiskTracker(DEFAULT_CONFIG)
         tracker.record_close("funding_rate", -100.0, NOW)
-        # After 5 minutes cooldown should be over
         assert tracker.is_in_cooldown("funding_rate", NOW + timedelta(minutes=6)) is False
 
     def test_daily_loss_triggers_pause(self):
         tracker = RiskTracker(DEFAULT_CONFIG)
-        # Accumulate losses > 500
         tracker.record_close("funding_rate", -300.0, NOW)
         tracker.record_close("funding_rate", -250.0, NOW + timedelta(minutes=1))
         assert tracker.is_strategy_paused("funding_rate", NOW + timedelta(minutes=2)) is True
@@ -378,7 +327,6 @@ class TestRiskTracker:
         tracker = RiskTracker(DEFAULT_CONFIG)
         tracker.record_close("funding_rate", -600.0, NOW)
         assert tracker.is_strategy_paused("funding_rate", NOW) is True
-        # Next day
         next_day = NOW + timedelta(days=1)
         assert tracker.is_strategy_paused("funding_rate", next_day) is False
 
@@ -386,7 +334,6 @@ class TestRiskTracker:
         tracker = RiskTracker(DEFAULT_CONFIG)
         tracker.record_close("funding_rate", -400.0, NOW)
         tracker.record_close("funding_rate", 200.0, NOW + timedelta(minutes=1))
-        # Net loss = 400 - 200 = 200, below 500 threshold
         assert tracker.is_strategy_paused("funding_rate", NOW + timedelta(minutes=2)) is False
 
     def test_strategies_are_independent(self):
@@ -423,7 +370,7 @@ class TestEvaluateRisk:
 
     def test_reject_cooldown(self, db_session):
         tracker = RiskTracker(DEFAULT_CONFIG)
-        tracker.record_close("funding_rate", -50.0, NOW)  # small loss, won't trigger pause
+        tracker.record_close("funding_rate", -50.0, NOW)
         verdict = evaluate_risk(
             DEFAULT_CONFIG, tracker, "funding_rate",
             open_positions=[], equity=Decimal("10000"),
@@ -433,10 +380,10 @@ class TestEvaluateRisk:
         assert "cooldown" in verdict.reason
 
     def test_reject_max_positions(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         for _ in range(3):
-            _open_position_directly(db_session, pid, strategy="funding_rate")
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
+            _open_position_directly(db_session, aid, strategy="funding_rate")
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         tracker = RiskTracker(DEFAULT_CONFIG)
         verdict = evaluate_risk(
             DEFAULT_CONFIG, tracker, "funding_rate",
@@ -447,9 +394,9 @@ class TestEvaluateRisk:
         assert "max_positions_per_strategy" in verdict.reason
 
     def test_reject_max_exposure(self, db_session):
-        engine, pid = _make_engine(db_session)
-        _open_position_directly(db_session, pid, entry_price=4000, quantity=1)
-        positions = db_session.query(PositionRow).filter(PositionRow.status == "OPEN").all()
+        engine, aid = _make_engine(db_session)
+        _open_position_directly(db_session, aid, entry_price=4000, quantity=1)
+        positions = db_session.query(AccountPositionRow).filter(AccountPositionRow.status == "OPEN").all()
         tracker = RiskTracker(DEFAULT_CONFIG)
         verdict = evaluate_risk(
             DEFAULT_CONFIG, tracker, "funding_rate",
@@ -460,10 +407,8 @@ class TestEvaluateRisk:
         assert "max_total_exposure" in verdict.reason
 
     def test_priority_daily_loss_before_cooldown(self, db_session):
-        """Daily loss pause is checked before cooldown."""
         tracker = RiskTracker(DEFAULT_CONFIG)
         tracker.record_close("funding_rate", -600.0, NOW)
-        # Both paused and in cooldown — daily_loss should be the reason
         verdict = evaluate_risk(
             DEFAULT_CONFIG, tracker, "funding_rate",
             open_positions=[], equity=Decimal("10000"),
@@ -478,10 +423,10 @@ class TestEvaluateRisk:
 
 class TestEngineRiskIntegration:
     def test_max_positions_rejects_signal(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         _seed_candle(db_session, "BTC", Decimal("60000"))
         for _ in range(3):
-            _open_position_directly(db_session, pid, strategy="funding_rate")
+            _open_position_directly(db_session, aid, strategy="funding_rate")
         signal = _seed_signal(db_session, strategy="funding_rate")
         equity = engine.get_current_equity(db_session)
         verdict = engine.check_risk(db_session, signal, equity, NOW)
@@ -489,12 +434,11 @@ class TestEngineRiskIntegration:
         assert "max_positions_per_strategy" in verdict.reason
 
     def test_different_strategy_accepted(self, db_session):
-        # Use high exposure limit — this test is about strategy position count independence
         config = DEFAULT_CONFIG.model_copy(update={"max_total_exposure_pct": 10.0})
-        engine, pid = _make_engine(db_session, config=config)
+        engine, aid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
         for _ in range(3):
-            _open_position_directly(db_session, pid, strategy="funding_rate")
+            _open_position_directly(db_session, aid, strategy="funding_rate")
         signal = _seed_signal(db_session, strategy="rsi_mean_reversion")
         equity = engine.get_current_equity(db_session)
         verdict = engine.check_risk(db_session, signal, equity, NOW)
@@ -502,73 +446,53 @@ class TestEngineRiskIntegration:
 
     def test_kelly_low_confidence_opens_position(self, db_session):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        engine, pid = _make_engine(db_session, config=config)
+        engine, aid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-
         signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.10)
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # confidence=0.10 → win_prob=0.55, b=2, kelly=(0.55*2-0.45)/2=0.325, half=0.1625
-        # notional = 10000*0.1625 = 1625, max_notional = (10000*0.02)/0.02 = 10000
-        # qty = 1625/60000 ≈ 0.02708
         assert float(pos.quantity) == pytest.approx(0.02708, rel=1e-2)
 
     def test_kelly_zero_confidence_opens_position(self, db_session):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        engine, pid = _make_engine(db_session, config=config)
+        engine, aid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-
         signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.0)
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # confidence=0 → win_prob=0.5, kelly_alloc=0.125
-        # notional = 10000*0.125 = 1250, qty = 1250/60000 ≈ 0.02083
         assert float(pos.quantity) == pytest.approx(0.02083, rel=1e-2)
 
     def test_kelly_high_confidence_larger_position(self, db_session):
         config = DEFAULT_CONFIG.model_copy(update={"kelly_enabled": True})
-        engine, pid = _make_engine(db_session, config=config)
+        engine, aid = _make_engine(db_session, config=config)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-
         signal = _seed_signal(db_session, strategy="funding_rate", confidence=0.8)
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # confidence=0.8 → win_prob=0.9, b=2, kelly=(0.9*2-0.1)/2=0.85, half=0.425
-        # notional = 10000*0.425 = 4250, max_notional = 10000 → not binding
-        # qty = 4250/60000 ≈ 0.07083
         assert float(pos.quantity) == pytest.approx(0.07083, rel=1e-2)
 
     def test_daily_loss_pause_after_stop_losses(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-
-        # Simulate closing 3 positions with -200 each = -600 total
         for _ in range(3):
-            pos = _open_position_directly(db_session, pid, strategy="funding_rate",
+            pos = _open_position_directly(db_session, aid, strategy="funding_rate",
                                           entry_price=60000, quantity=1.0)
             engine.close_position(db_session, pos, Decimal("59800"), "stop_loss")
-
         signal = _seed_signal(db_session, strategy="funding_rate")
         equity = engine.get_current_equity(db_session)
-        # Use a time well after close_position's datetime.now() calls
-        # to be outside cooldown but still on same day
         check_time = datetime.now(timezone.utc) + timedelta(minutes=10)
         verdict = engine.check_risk(db_session, signal, equity, check_time)
         assert verdict.allowed is False
         assert "daily_loss" in verdict.reason
 
     def test_cooldown_blocks_immediate_reentry(self, db_session):
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         _seed_candle(db_session, "BTC", Decimal("60000"))
-
-        # Single small loss — triggers cooldown but not daily pause
-        pos = _open_position_directly(db_session, pid, strategy="funding_rate",
+        pos = _open_position_directly(db_session, aid, strategy="funding_rate",
                                       entry_price=60000, quantity=0.1)
         engine.close_position(db_session, pos, Decimal("59800"), "stop_loss")
-
         signal = _seed_signal(db_session, strategy="funding_rate")
         equity = engine.get_current_equity(db_session)
-        # Immediately after loss — should be in cooldown
         verdict = engine.check_risk(db_session, signal, equity,
                                     datetime.now(timezone.utc))
         assert verdict.allowed is False

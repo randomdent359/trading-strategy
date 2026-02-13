@@ -8,14 +8,10 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import BigInteger, Integer, JSON, create_engine, event
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Session
 
 from trading_core.config.schema import PaperConfig
-from trading_core.db.base import Base
 from trading_core.db.tables.market_data import CandleRow, PolymarketMarketRow
-from trading_core.db.tables.paper import PortfolioRow, PositionRow
+from trading_core.db.tables.accounts import AccountPositionRow
 from trading_core.db.tables.signals import SignalRow
 from trading_core.paper.engine import PaperEngine
 from trading_core.paper.oracle import PriceEntry, PriceOracle
@@ -28,32 +24,9 @@ DEFAULT_CONFIG = PaperConfig(
     default_stop_loss_pct=0.02,
     default_take_profit_pct=0.04,
     default_timeout_minutes=60,
+    slippage_pct={"hyperliquid": 0.0, "polymarket": 0.0},
+    fee_pct={"hyperliquid": 0.0, "polymarket": 0.0},
 )
-
-
-@pytest.fixture
-def db_session():
-    """In-memory SQLite session with all schemas/tables created."""
-    engine = create_engine("sqlite:///:memory:")
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_conn, _rec):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    for table in Base.metadata.tables.values():
-        table.schema = None
-        for col in table.columns:
-            if isinstance(col.type, JSONB):
-                col.type = JSON()
-            if isinstance(col.type, BigInteger):
-                col.type = Integer()
-
-    Base.metadata.create_all(engine)
-
-    session = Session(engine)
-    yield session
-    session.close()
-    engine.dispose()
 
 
 @pytest.fixture
@@ -117,10 +90,14 @@ def _seed_signal(session, strategy="funding_rate", asset="BTC", exchange="hyperl
     return row
 
 
-def _make_engine(session, config=None, oracle=None, initial_capital=10000):
+def _make_engine(session, config=None, oracle=None, initial_capital=10000,
+                 exchange="hyperliquid", strategy="funding_rate"):
     cfg = config or DEFAULT_CONFIG
-    pid = PaperEngine.ensure_portfolio(session, name="default", initial_capital=initial_capital)
-    return PaperEngine(cfg, pid, oracle=oracle), pid
+    aid = PaperEngine.ensure_account(
+        session, name=f"test_{exchange}_{strategy}",
+        exchange=exchange, strategy=strategy, initial_capital=initial_capital,
+    )
+    return PaperEngine(cfg, aid, exchange, strategy, oracle=oracle), aid
 
 
 # ── TestStaleness ─────────────────────────────────────────────
@@ -278,17 +255,17 @@ class TestEngineWithOracle:
         oracle = PriceOracle(assets=["BTC"], staleness_threshold_s=30.0)
         oracle.update_price("BTC", "hyperliquid", Decimal("60500"))
 
-        engine, pid = _make_engine(db_session, oracle=oracle)
+        engine, aid = _make_engine(db_session, oracle=oracle)
         signal = _seed_signal(db_session, asset="BTC", exchange="hyperliquid")
         # No candle in DB — oracle is the only source
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is not None
-        # Entry price should be based on oracle's 60500 (with slippage)
-        assert float(pos.entry_price) == pytest.approx(60500 * (1 + 0.0005), rel=1e-4)
+        # Entry price should be based on oracle's 60500 (no slippage with zeroed config)
+        assert float(pos.entry_price) == pytest.approx(60500, rel=1e-4)
 
     def test_engine_falls_back_to_db_without_oracle(self, db_session):
         """Without oracle, engine falls back to get_latest_price (DB)."""
-        engine, pid = _make_engine(db_session)
+        engine, aid = _make_engine(db_session)
         _seed_candle(db_session, "BTC", Decimal("60000"))
         signal = _seed_signal(db_session, asset="BTC", exchange="hyperliquid")
         pos = engine.open_position(db_session, signal, Decimal("10000"))
@@ -296,35 +273,36 @@ class TestEngineWithOracle:
 
     def test_oracle_none_preserves_old_behavior(self, db_session):
         """Engine with oracle=None behaves identically to original."""
-        engine, pid = _make_engine(db_session, oracle=None)
+        engine, aid = _make_engine(db_session, oracle=None)
         signal = _seed_signal(db_session, asset="BTC", exchange="hyperliquid")
         # No candle, no oracle → no price → None
         pos = engine.open_position(db_session, signal, Decimal("10000"))
         assert pos is None
 
-    def test_consume_signals_includes_pm_with_oracle(self, db_session):
-        """With oracle, consume_signals includes polymarket signals."""
+    def test_consume_signals_matches_account_exchange(self, db_session):
+        """Engine only consumes signals matching its account exchange and strategy."""
         oracle = PriceOracle(assets=["BTC"], staleness_threshold_s=30.0)
-        engine, pid = _make_engine(db_session, oracle=oracle)
+        engine, aid = _make_engine(db_session, oracle=oracle, exchange="hyperliquid", strategy="funding_rate")
 
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
-        _seed_signal(db_session, exchange="polymarket", acted_on=False, strategy="contrarian_pure")
-
-        signals = engine.consume_signals(db_session)
-        exchanges = {s.exchange for s in signals}
-        assert "hyperliquid" in exchanges
-        assert "polymarket" in exchanges
-
-    def test_consume_signals_hl_only_without_oracle(self, db_session):
-        """Without oracle, consume_signals only returns hyperliquid signals."""
-        engine, pid = _make_engine(db_session, oracle=None)
-
-        _seed_signal(db_session, exchange="hyperliquid", acted_on=False)
-        _seed_signal(db_session, exchange="polymarket", acted_on=False, strategy="contrarian_pure")
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
+        _seed_signal(db_session, exchange="polymarket", strategy="contrarian_pure", acted_on=False)
 
         signals = engine.consume_signals(db_session)
         assert len(signals) == 1
         assert signals[0].exchange == "hyperliquid"
+        assert signals[0].strategy == "funding_rate"
+
+    def test_pm_engine_consumes_pm_signals(self, db_session):
+        """A polymarket-scoped engine consumes polymarket signals."""
+        oracle = PriceOracle(assets=["BTC"], staleness_threshold_s=30.0, pm_staleness_threshold_s=600.0)
+        engine, aid = _make_engine(db_session, oracle=oracle, exchange="polymarket", strategy="contrarian_pure")
+
+        _seed_signal(db_session, exchange="hyperliquid", strategy="funding_rate", acted_on=False)
+        _seed_signal(db_session, exchange="polymarket", strategy="contrarian_pure", acted_on=False)
+
+        signals = engine.consume_signals(db_session)
+        assert len(signals) == 1
+        assert signals[0].exchange == "polymarket"
 
     def test_pm_signal_opens_position_with_oracle(self, db_session):
         """PM signal with oracle-provided price should open a position."""
@@ -335,7 +313,7 @@ class TestEngineWithOracle:
         )
         oracle.update_price("BTC", "polymarket", Decimal("0.72"))
 
-        engine, pid = _make_engine(db_session, oracle=oracle)
+        engine, aid = _make_engine(db_session, oracle=oracle, exchange="polymarket", strategy="contrarian_pure")
         signal = _seed_signal(
             db_session, asset="BTC", exchange="polymarket",
             strategy="contrarian_pure", entry_price=0.72,
